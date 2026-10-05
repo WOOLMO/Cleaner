@@ -1,0 +1,16 @@
+{
+  "name": "cleaner-ai",
+  "version": "0.2.0",
+  "description": "Finds files you don't need, asks Gemini to double-check them, and removes them when you say so.",
+  "type": "module",
+  "bin": {
+    "cleaner": "bin/cleaner.js"
+  },
+  "scripts": {
+    "start": "node bin/cleaner.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}
