@@ -10,7 +10,7 @@ export function makeHeader({ roots, model }) {
   return [
     "# cleaner database. One item per line, columns separated by tabs.",
     "# verdict: remove = safe to delete, review = your call.",
-    "# status: pending, removed, failed, missing. Change an item's status to keep and cleaner will leave it alone.",
+    "# status: pending, removed, held, failed, missing. Change an item's status to keep and cleaner will leave it alone.",
     `# created: ${new Date().toISOString()}`,
     `# scanned: ${roots.join(" | ")}`,
     `# classified by: ${model}`,

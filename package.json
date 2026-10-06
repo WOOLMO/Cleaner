@@ -1,16 +1,41 @@
 {
   "name": "cleaner-ai",
-  "version": "0.2.0",
-  "description": "Finds files you don't need, asks Gemini to double-check them, and removes them when you say so.",
+  "version": "1.0.0",
+  "description": "Finds files you don't need on Windows, has Gemini double-check them, and removes them only when you say y.",
   "type": "module",
   "bin": {
     "cleaner": "bin/cleaner.js"
   },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
   "scripts": {
-    "start": "node bin/cleaner.js"
+    "start": "node bin/cleaner.js",
+    "test": "node --test test/*.test.js"
   },
   "engines": {
     "node": ">=22"
   },
+  "os": [
+    "win32"
+  ],
+  "keywords": [
+    "disk-cleanup",
+    "junk-files",
+    "duplicates",
+    "gemini",
+    "cli",
+    "windows"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WOOLMO/Cleaner.git"
+  },
+  "homepage": "https://github.com/WOOLMO/Cleaner#readme",
+  "bugs": "https://github.com/WOOLMO/Cleaner/issues",
   "license": "MIT"
 }

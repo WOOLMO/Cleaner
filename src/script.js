@@ -1,9 +1,21 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { formatSize } from "./ui.js";
 
 const quote = (text) => `'${String(text).replace(/'/g, "''")}'`;
 const oneLine = (text) => String(text ?? "").replace(/[\r\n]+/g, " ").trim();
+
+// The real Desktop, which OneDrive often moves (for example to OneDrive\Bureau on a French PC).
+export function desktopDir() {
+  const r = spawnSync("powershell.exe", [
+    "-NoProfile", "-NonInteractive", "-Command",
+    "[Console]::OutputEncoding = [Text.Encoding]::UTF8; [Environment]::GetFolderPath('Desktop')",
+  ], { encoding: "utf8", windowsHide: true, timeout: 15_000 });
+  const found = r.stdout?.trim();
+  return found && fs.existsSync(found) ? found : path.join(os.homedir(), "Desktop");
+}
 
 const BODY = String.raw`
 function Format-Size([double]$b) {
@@ -48,16 +60,15 @@ Write-Host ''
 Write-Host ('  Done. {0} removed, {1} failed. Freed {2}, {3} free now.' -f ($todo.Count - $failed), $failed, (Format-Size ([math]::Max(0, $after - $before))), (Format-Size $after)) -ForegroundColor Green
 `;
 
-// Writes cleaner-remove.ps1 (the full delete command) and cleaner-remove.bat (double-click launcher).
-// Safe items are switched on; "your call" items are written but commented out.
-export function writeRemovalScript(entries, { dir, roots }) {
+export function buildScript(entries, { roots }) {
   const pending = entries.filter((e) => e.status === "pending");
   const safe = pending.filter((e) => e.verdict === "remove");
   const yours = pending.filter((e) => e.verdict === "review");
   const item = (e) => `[pscustomobject]@{ Size = ${e.size}; Path = ${quote(e.path)} }`;
   const note = (e) => `  # ${formatSize(e.size)}  ${oneLine(e.category)}: ${oneLine(e.reason)}`;
+  const total = (list) => formatSize(list.reduce((s, e) => s + e.size, 0));
 
-  const lines = [
+  const text = [
     "# cleaner removal script",
     `# Generated ${new Date().toLocaleString()} from a scan of ${roots.join(", ")}`,
     "#",
@@ -66,20 +77,25 @@ export function writeRemovalScript(entries, { dir, roots }) {
     "# Deletion is permanent.",
     "",
     "$items = @(",
-    `  # ---- safe to remove: ${safe.length} items, ${formatSize(safe.reduce((s, e) => s + e.size, 0))} ----`,
+    `  # ---- safe to remove: ${safe.length} items, ${total(safe)} ----`,
     ...safe.flatMap((e) => [note(e), `  ${item(e)}`]),
     "",
-    `  # ---- your call, switched off: ${yours.length} items, ${formatSize(yours.reduce((s, e) => s + e.size, 0))} ----`,
+    `  # ---- your call, switched off: ${yours.length} items, ${total(yours)} ----`,
     ...yours.flatMap((e) => [note(e), `  # ${item(e)}`]),
     ")",
     BODY,
-  ];
+  ].join("\r\n").replace(/\r?\n/g, "\r\n");
+  return { text, safe: safe.length, yours: yours.length };
+}
 
+// Writes cleaner-remove.ps1 (the full delete command) and cleaner-remove.bat (double-click launcher).
+export function writeRemovalScript(entries, { dir, roots }) {
+  const { text, safe, yours } = buildScript(entries, { roots });
   fs.mkdirSync(dir, { recursive: true });
   const ps1 = path.join(dir, "cleaner-remove.ps1");
   const bat = path.join(dir, "cleaner-remove.bat");
   // Windows PowerShell 5 needs a byte-order mark to read UTF-8 paths correctly.
-  fs.writeFileSync(ps1, "﻿" + lines.join("\r\n").replace(/\r?\n/g, "\r\n") + "\r\n", "utf8");
+  fs.writeFileSync(ps1, "﻿" + text + "\r\n", "utf8");
   fs.writeFileSync(bat, [
     "@echo off",
     "title cleaner removal script",
@@ -88,5 +104,5 @@ export function writeRemovalScript(entries, { dir, roots }) {
     "pause",
     "",
   ].join("\r\n"), "ascii");
-  return { ps1, bat, safe: safe.length, yours: yours.length };
+  return { ps1, bat, safe, yours };
 }

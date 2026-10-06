@@ -1,9 +1,9 @@
 import { formatSize, daysAgo } from "./ui.js";
 
-const API = "https://generativelanguage.googleapis.com/v1beta/models/";
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const API = "https://generativelanguage.googleapis.com/v1beta/models";
+const realSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const SYSTEM = `You review files and folders on a Windows PC and decide which ones the owner does not need.
+export const CLASSIFY_PROMPT = `You review files and folders on a Windows PC and decide which ones the owner does not need.
 Return exactly one result for every item, using the same id.
 
 verdict:
@@ -21,7 +21,7 @@ confidence: 0 to 1, how sure you are.
 category: short kebab-case label such as cache, temp-file, duplicate, installer, build-output, personal-media.
 reason: a short plain label under 70 characters that a non-technical person understands, written like "Unfinished download, untouched for 40 days" or "Exact copy of a video kept elsewhere". Do not start with "This is" and do not repeat the path.`;
 
-const SCHEMA = {
+const CLASSIFY_SCHEMA = {
   type: "OBJECT",
   properties: {
     results: {
@@ -42,6 +42,40 @@ const SCHEMA = {
   required: ["results"],
 };
 
+export const EXPLAIN_PROMPT = `You explain what the biggest folders on a Windows PC are, so the owner can decide how to free space.
+For every folder return one result with the same id:
+- label: what it is in plain words, under 45 characters, like "Unreal Engine 5.5 (game engine)" or "Windows system files".
+- kind: system, app, game, dev-tool, cache, user-files, downloads or other.
+- advice: keep (needed or personal), check (the owner should look), or reclaim (space can safely be won back).
+- tip: one plain sentence under 100 characters with the safe way to win the space back, or why to keep it.
+
+Rules:
+- Never suggest deleting Windows system folders by hand. Point to Disk Cleanup or Storage Sense instead.
+- For installed programs and games, suggest uninstalling through Settings > Apps or their launcher, never deleting the folder.
+- For personal files, suggest moving them to another drive or the cloud rather than deleting them.
+- "loose" means files sitting directly inside that folder rather than in its subfolders.`;
+
+const EXPLAIN_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    results: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: {
+          id: { type: "INTEGER" },
+          label: { type: "STRING" },
+          kind: { type: "STRING", enum: ["system", "app", "game", "dev-tool", "cache", "user-files", "downloads", "other"] },
+          advice: { type: "STRING", enum: ["keep", "check", "reclaim"] },
+          tip: { type: "STRING" },
+        },
+        required: ["id", "label", "kind", "advice", "tip"],
+      },
+    },
+  },
+  required: ["results"],
+};
+
 function retryDelayMs(data) {
   const info = (data.error?.details ?? []).find((d) => d.retryDelay);
   const match = info?.retryDelay?.match(/^([\d.]+)s$/);
@@ -56,11 +90,14 @@ function networkError(err) {
 }
 
 export class Gemini {
-  constructor({ apiKey, models, minIntervalMs = 4000 }) {
+  constructor({ apiKey, models, minIntervalMs = 4000, retryBaseMs = 1500, fetchImpl = globalThis.fetch, sleep = realSleep }) {
     this.apiKey = apiKey;
     this.models = models;
     this.index = 0;
     this.minIntervalMs = minIntervalMs;
+    this.retryBaseMs = retryBaseMs;
+    this.fetch = fetchImpl;
+    this.sleep = sleep;
     this.lastCall = 0;
     this.used = new Set();
   }
@@ -72,7 +109,7 @@ export class Gemini {
   // Free-tier limits are per minute, so calls are spaced out.
   async pace() {
     const wait = this.lastCall + this.minIntervalMs - Date.now();
-    if (wait > 0) await sleep(wait);
+    if (wait > 0) await this.sleep(wait);
     this.lastCall = Date.now();
   }
 
@@ -84,7 +121,7 @@ export class Gemini {
       const model = this.model;
       let res, data;
       try {
-        res = await fetch(`${API}${model}:generateContent`, {
+        res = await this.fetch(`${API}/${model}:generateContent`, {
           method: "POST",
           headers: { "content-type": "application/json", "x-goog-api-key": this.apiKey },
           body: JSON.stringify(body),
@@ -93,7 +130,7 @@ export class Gemini {
         data = await res.json().catch(() => ({}));
       } catch (err) {
         lastError = networkError(err);
-        await sleep(Math.min(30_000, 2000 * attempt));
+        await this.sleep(Math.min(30_000, this.retryBaseMs * attempt));
         continue;
       }
 
@@ -112,24 +149,44 @@ export class Gemini {
       const message = data.error?.message || res.statusText;
       lastError = `${model}: HTTP ${res.status} ${message}`;
       if ([400, 401, 403].includes(res.status)) {
-        if (/api key/i.test(message)) throw new Error("the API key was rejected, check GEMINI_API_KEY in .env");
+        if (/api key/i.test(message)) throw new Error("the API key was rejected, run cleaner setup to change it");
         throw new Error(`gemini refused the request (${res.status}): ${message}`);
       }
       if (res.status === 429) {
         const delay = retryDelayMs(data);
         if (delay !== null && delay <= 60_000) {
-          await sleep(delay + 500);
+          await this.sleep(delay + 500);
         } else {
           this.index++; // this model's quota is used up, try the next one
-          await sleep(2000);
+          await this.sleep(this.retryBaseMs);
         }
         continue;
       }
       this.index++; // 404 or a busy model: move along the fallback list
-      await sleep(Math.min(20_000, 1500 * attempt));
+      await this.sleep(Math.min(20_000, this.retryBaseMs * attempt));
     }
     throw new Error(lastError);
   }
+
+  // A cheap request that tells whether a key works.
+  static async checkKey(apiKey, fetchImpl = globalThis.fetch) {
+    try {
+      const res = await fetchImpl(`${API}?pageSize=1`, { headers: { "x-goog-api-key": apiKey }, signal: AbortSignal.timeout(20_000) });
+      if (res.ok) return { ok: true };
+      const data = await res.json().catch(() => ({}));
+      return { ok: false, message: data.error?.message || `HTTP ${res.status}` };
+    } catch (err) {
+      return { ok: false, message: networkError(err) };
+    }
+  }
+}
+
+function request(prompt, schema, text) {
+  return {
+    systemInstruction: { parts: [{ text: prompt }] },
+    contents: [{ role: "user", parts: [{ text }] }],
+    generationConfig: { temperature: 0.1, responseMimeType: "application/json", responseSchema: schema },
+  };
 }
 
 function toPrompt(item) {
@@ -154,13 +211,8 @@ export async function classifyItems(items, { gemini, batchSize, onProgress }) {
   const results = new Map();
   for (let i = 0; i < items.length; i += batchSize) {
     const batch = items.slice(i, i + batchSize);
-    const body = {
-      systemInstruction: { parts: [{ text: SYSTEM }] },
-      contents: [{ role: "user", parts: [{ text: "Classify these items:\n" + JSON.stringify(batch.map(toPrompt)) }] }],
-      generationConfig: { temperature: 0.1, responseMimeType: "application/json", responseSchema: SCHEMA },
-    };
     try {
-      const out = await gemini.generate(body);
+      const out = await gemini.generate(request(CLASSIFY_PROMPT, CLASSIFY_SCHEMA, "Classify these items:\n" + JSON.stringify(batch.map(toPrompt))));
       for (const r of out.results ?? []) if (Number.isInteger(r.id)) results.set(r.id, r);
     } catch (error) {
       return { results, error };
@@ -168,4 +220,23 @@ export async function classifyItems(items, { gemini, batchSize, onProgress }) {
     onProgress?.(Math.min(i + batchSize, items.length), items.length);
   }
   return { results, error: null };
+}
+
+// One request: what each big folder is and how to win its space back. Only folder names and sizes are sent.
+export async function explainFolders(units, { gemini }) {
+  const entries = units.map((u, i) => ({
+    id: i + 1,
+    path: u.path,
+    size: formatSize(u.size),
+    ...(u.loose ? { loose: true } : {}),
+    biggestSubfolders: u.children.map((ch) => `${ch.name} (${formatSize(ch.size)})`),
+  }));
+  try {
+    const out = await gemini.generate(request(EXPLAIN_PROMPT, EXPLAIN_SCHEMA, "Explain these folders:\n" + JSON.stringify(entries)));
+    const results = new Map();
+    for (const r of out.results ?? []) if (Number.isInteger(r.id)) results.set(r.id, r);
+    return { results, error: null };
+  } catch (error) {
+    return { results: new Map(), error };
+  }
 }
