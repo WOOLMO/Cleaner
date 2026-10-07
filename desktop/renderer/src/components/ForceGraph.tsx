@@ -18,9 +18,18 @@ export interface GNode {
   category?: string;
   tone?: "accent" | "amber" | "new";
   open?: boolean;
+  // Big graphs (the full network) set these: a fixed size, a branch color, a starting position
+  // from a tidy tree layout, and a delay so the web unfolds in waves.
+  radius?: number;
+  color?: string;
+  seedX?: number;
+  seedY?: number;
+  delay?: number;
 }
 
 export type GraphLayout = "web" | "rings";
+// Above this many nodes the graph switches to batched drawing and lighter physics.
+const BIG = 600;
 
 interface SimNode extends SimulationNodeDatum, GNode {
   r: number;
@@ -54,6 +63,7 @@ function hash(s: string) {
 }
 
 export function radiusOf(n: GNode) {
+  if (n.radius !== undefined) return n.radius;
   if (n.kind === "root") return 18;
   if (n.kind === "more") return 9;
   if (n.kind === "dir") return 6.5 + Math.min(9, Math.sqrt(n.count ?? 0) * 1.25);
@@ -147,17 +157,35 @@ export function ForceGraph(props: {
       .stop();
   }
 
+  // Forces for the current layout and size. Big graphs get short links, a light repulsion and a
+  // coarser Barnes-Hut approximation, so thousands of folders still move at full frame rate.
+  const bigRef = useRef(false);
+  function configureForces() {
+    const sim = simRef.current!;
+    const layout = propsRef.current.layout ?? "web";
+    const big = bigRef.current;
+    sim.alphaDecay(big ? 0.026 : 0.018).velocityDecay(big ? 0.42 : 0.34);
+    const link = forceLink<SimNode, SimLink>(linksRef.current)
+      .id((d) => d.id)
+      .distance((l) =>
+        big
+          ? 12 + l.source.r + l.target.r + (l.target.open ? 16 : 0)
+          : (l.target.kind === "file" ? 16 : 40) + l.source.r + l.target.r + (layout === "rings" ? 0 : Math.min(40, (l.target.count ?? 0) * 0.6)),
+      )
+      .strength((l) => (layout === "rings" ? 0.12 : big ? 0.85 : l.target.kind === "file" ? 0.9 : 0.6));
+    const charge = big
+      ? forceManyBody<SimNode>().strength((d) => (d.kind === "root" ? -420 : -30 - d.r * 5)).theta(0.95).distanceMax(320)
+      : forceManyBody<SimNode>().strength((d) => (d.kind === "root" ? -700 : d.kind === "dir" ? -210 : d.kind === "more" ? -90 : -26)).distanceMax(460);
+    sim
+      .force("link", link)
+      .force("charge", charge)
+      .force("collide", forceCollide<SimNode>().radius((d) => d.r + (big ? 1.5 : d.kind === "file" ? 1.6 : 5)).iterations(big ? 1 : 2));
+  }
+
   useEffect(() => {
     const sim = simRef.current!;
     const layout = props.layout ?? "web";
-    const link = forceLink<SimNode, SimLink>(linksRef.current)
-      .id((d) => d.id)
-      .distance((l) => (l.target.kind === "file" ? 16 : 40) + l.source.r + l.target.r + (layout === "rings" ? 0 : Math.min(40, (l.target.count ?? 0) * 0.6)))
-      .strength((l) => (layout === "rings" ? 0.12 : l.target.kind === "file" ? 0.9 : 0.6));
-    sim
-      .force("link", link)
-      .force("charge", forceManyBody<SimNode>().strength((d) => (d.kind === "root" ? -700 : d.kind === "dir" ? -210 : d.kind === "more" ? -90 : -26)).distanceMax(460))
-      .force("collide", forceCollide<SimNode>().radius((d) => d.r + (d.kind === "file" ? 1.6 : 5)).iterations(2));
+    configureForces();
     if (layout === "rings") {
       sim
         .force("radial", forceRadial<SimNode>((d) => d.depth * 132, 0, 0).strength((d) => (d.depth === 0 ? 1 : 0.86)))
@@ -185,6 +213,7 @@ export function ForceGraph(props: {
     const next = new Map<string, SimNode>();
     const now = performance.now();
     let added = 0;
+    const big = props.nodes.length > BIG;
     for (const n of props.nodes) {
       let s = old.get(n.id);
       if (s) {
@@ -192,20 +221,21 @@ export function ForceGraph(props: {
       } else {
         const parent = n.parent ? (next.get(n.parent) ?? old.get(n.parent)) : null;
         const a = hash(n.id) * Math.PI * 2;
+        const seeded = n.seedX !== undefined && n.seedY !== undefined;
         s = {
           ...n,
-          x: (parent?.x ?? 0) + Math.cos(a) * 4,
-          y: (parent?.y ?? 0) + Math.sin(a) * 4,
+          x: seeded ? n.seedX! + Math.cos(a) * 2 : (parent?.x ?? 0) + Math.cos(a) * 4,
+          y: seeded ? n.seedY! + Math.sin(a) * 2 : (parent?.y ?? 0) + Math.sin(a) * 4,
           vx: 0,
           vy: 0,
           r: 0,
           depth: 0,
-          born: now + Math.min(260, added * 3),
+          born: now + (n.delay ?? Math.min(260, added * 3)),
           bend: hash(n.id + "~") > 0.5 ? 1 : -1,
           seed: hash(n.id + "#"),
         };
         added++;
-        if (parent && !ripplesRef.current.some((r) => now - r.start < 200 && r.x === parent.x && r.y === parent.y)) {
+        if (!big && parent && !ripplesRef.current.some((r) => now - r.start < 200 && r.x === parent.x && r.y === parent.y)) {
           ripplesRef.current.push({ x: parent.x ?? 0, y: parent.y ?? 0, start: now });
         }
       }
@@ -244,8 +274,13 @@ export function ForceGraph(props: {
     }
     linksRef.current = list.filter((n) => n.parent && next.has(n.parent)).map((n) => ({ source: next.get(n.parent!)!, target: n }));
     sim.nodes(list);
-    (sim.force("link") as ForceLink<SimNode, SimLink> | undefined)?.links(linksRef.current);
-    sim.force("collide", forceCollide<SimNode>().radius((d) => d.r + (d.kind === "file" ? 1.6 : 5)).iterations(2));
+    if (big !== bigRef.current) {
+      bigRef.current = big;
+      configureForces();
+    } else {
+      (sim.force("link") as ForceLink<SimNode, SimLink> | undefined)?.links(linksRef.current);
+      sim.force("collide", forceCollide<SimNode>().radius((d) => d.r + (big ? 1.5 : d.kind === "file" ? 1.6 : 5)).iterations(big ? 1 : 2));
+    }
     if (added || old.size !== next.size) sim.alpha(Math.max(sim.alpha(), old.size === 0 ? 1 : 0.55));
     // A hidden window (screenshot mode) paints no frames, so settle the layout right away.
     const hidden = offscreen();
@@ -420,12 +455,21 @@ export function ForceGraph(props: {
       return { sx, sy, tx, ty, cx, cy };
     };
     ctx.lineCap = "round";
+    const big = bigRef.current;
+    // Big graphs batch every settled link into two paths (normal and faded) and stroke each once.
+    const batch = big ? { normal: new Path2D(), faint: new Path2D() } : null;
     for (const l of linksRef.current) {
       const g = grow(l.target);
       if (g <= 0) continue;
       const c = curve(l.source, l.target);
       const on = path.has(l.target.id);
       const faded = dimmed(l.target.id);
+      if (batch && !on && g >= 1 && !l.target.tone) {
+        const p = faded ? batch.faint : batch.normal;
+        p.moveTo(c.sx, c.sy);
+        p.quadraticCurveTo(c.cx, c.cy, c.tx, c.ty);
+        continue;
+      }
       ctx.globalAlpha = (faded ? 0.12 : on ? 1 : l.target.kind === "file" ? 0.55 : 0.85) * Math.min(1, g);
       ctx.strokeStyle = on ? pal.accent : l.target.tone === "accent" ? pal.accent : pal.lineStrong;
       ctx.lineWidth = (on ? 2 : l.target.kind === "file" ? 0.8 : 1.2) / Math.max(0.6, Math.min(k, 1.4));
@@ -440,12 +484,22 @@ export function ForceGraph(props: {
       } else ctx.quadraticCurveTo(c.cx, c.cy, c.tx, c.ty);
       ctx.stroke();
     }
+    if (batch) {
+      ctx.strokeStyle = pal.lineStrong;
+      ctx.lineWidth = 0.9 / Math.max(0.5, Math.min(k, 1.4));
+      ctx.globalAlpha = 0.8;
+      ctx.stroke(batch.normal);
+      ctx.globalAlpha = 0.1;
+      ctx.stroke(batch.faint);
+    }
 
     // traffic: small particles travelling from each folder to what it holds
-    if (linksRef.current.length < 2600) {
+    // (on a big graph, a sample of the links carries traffic, plus the lit path)
+    {
       for (const l of linksRef.current) {
         const on = path.has(l.target.id);
         if (!on && (l.target.kind === "file" || dimmed(l.target.id))) continue;
+        if (!on && big && l.target.seed > 0.07) continue;
         if (grow(l.target) < 1) continue;
         const c = curve(l.source, l.target);
         const speed = on ? 1 / 900 : 1 / 2600;
@@ -493,7 +547,41 @@ export function ForceGraph(props: {
 
     // nodes: files under folders, the root on top
     const order = [...nodes.values()].sort((a, b) => rank(a) - rank(b));
+    // Big graphs fill every ordinary folder in one path per color; special ones are drawn after, on top.
+    const special = (n: SimNode) => n.kind !== "dir" || n.id === selected || n === hovered || path.has(n.id) || Boolean(n.tone) || grow(n) < 1;
+    if (big) {
+      const fills = new Map<string, Path2D>();
+      const faint = new Map<string, Path2D>();
+      const rims = new Path2D();
+      for (const n of order) {
+        if (special(n)) continue;
+        const x = n.x ?? 0, y = n.y ?? 0;
+        const fill = n.color ?? (n.open ? pal.surface2 : pal.surface);
+        const group = dimmed(n.id) ? faint : fills;
+        const p = group.get(fill) ?? group.set(fill, new Path2D()).get(fill)!;
+        p.moveTo(x + n.r, y);
+        p.arc(x, y, n.r, 0, Math.PI * 2);
+        if (!n.color) {
+          rims.moveTo(x + n.r, y);
+          rims.arc(x, y, n.r, 0, Math.PI * 2);
+        }
+      }
+      ctx.globalAlpha = 1;
+      for (const [fill, p] of fills) {
+        ctx.fillStyle = fill;
+        ctx.fill(p);
+      }
+      ctx.strokeStyle = pal.lineStrong;
+      ctx.lineWidth = 1.2 / Math.max(0.7, Math.min(k, 1.5));
+      ctx.stroke(rims);
+      ctx.globalAlpha = 0.18;
+      for (const [fill, p] of faint) {
+        ctx.fillStyle = fill;
+        ctx.fill(p);
+      }
+    }
     for (const n of order) {
+      if (big && !special(n)) continue;
       const g = grow(n);
       if (g <= 0) continue;
       const x = n.x ?? 0, y = n.y ?? 0;
@@ -536,8 +624,8 @@ export function ForceGraph(props: {
         ctx.stroke();
         ctx.setLineDash([]);
       } else {
-        ctx.fillStyle = n.open ? pal.surface2 : pal.surface;
-        ctx.strokeStyle = on ? pal.accent : n.open ? pal.text3 : pal.lineStrong;
+        ctx.fillStyle = n.color ?? (n.open ? pal.surface2 : pal.surface);
+        ctx.strokeStyle = on ? pal.accent : n.color ?? (n.open ? pal.text3 : pal.lineStrong);
         ctx.lineWidth = (on ? 2 : 1.4) / Math.max(0.7, Math.min(k, 1.5));
         ctx.beginPath();
         ctx.arc(x, y, r, 0, Math.PI * 2);
@@ -586,8 +674,8 @@ export function ForceGraph(props: {
       const show =
         n.kind === "root" ||
         on ||
-        (n.kind === "dir" && k * n.r > 5.5) ||
-        (n.kind === "more" && k > 0.7) ||
+        (n.kind === "dir" && (k * n.r > (big ? 7 : 5.5) || (big && n.depth === 1))) ||
+        (n.kind === "more" && k > (big ? 1.6 : 0.7)) ||
         (n.kind === "file" && k > 1.7);
       if (!show || (dimmed(n.id) && !on)) continue;
       const prio = n.kind === "root" ? 0 : n === hovered || n.id === selected ? 1 : on ? 2 : 3 + n.depth * 2 + (n.kind === "dir" ? 0 : 1) - n.r / 40;
@@ -595,7 +683,7 @@ export function ForceGraph(props: {
     }
     candidates.sort((a, b) => a.prio - b.prio);
     const placed: { x0: number; y0: number; x1: number; y1: number }[] = [];
-    for (const { n, on } of candidates) {
+    for (const { n, on } of big ? candidates.slice(0, 200) : candidates) {
       const g = grow(n);
       const size = n.kind === "root" ? 13 : n.kind === "file" ? 10.5 : 11.5;
       ctx.font = `${n.kind === "root" ? 600 : on || n.kind === "dir" ? 500 : 400} ${size / k}px ${pal.font}`;

@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { ArrowUpRight, FolderOpen, FolderTree, HardDrive, Home, Network, Search, X } from "lucide-react";
 import { api } from "../api";
 import { buildNetwork, cancelNetwork, loadGraph, setGraphMode, useStore } from "../store";
-import { NetworkView, branchColor } from "../components/NetworkView";
+import { ForceGraph, type GNode } from "../components/ForceGraph";
+import { branchColor, networkNodes } from "../components/networkLayout";
 import { PageHead } from "../components/ui";
 import { displayRoot, duration, formatCount, formatSize, shortPath } from "../format";
 
@@ -41,6 +42,17 @@ export function FullNetwork() {
     return out;
   }, [net, selected]);
   const total = net?.nodes[0]?.size || 1;
+  const gnodes = useMemo(() => (net ? networkNodes(net, dark) : []), [net, dark]);
+  const emphasis = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!net || q.length < 2) return null;
+    return new Set(net.nodes.filter((n) => n.name.toLowerCase().includes(q)).map((n) => String(n.id)));
+  }, [net, query]);
+  const tooltip = (g: GNode) => {
+    const n = net!.nodes[Number(g.id)];
+    const pct = (n.size / total) * 100;
+    return { title: n.name, sub: `${formatSize(n.size)} · ${pct.toFixed(pct < 1 ? 2 : 1)}% of everything${n.more ? "" : n.sub ? ` · ${n.sub} subfolders` : ""}` };
+  };
   const matches = net && query.trim().length >= 2 ? net.nodes.filter((n) => n.name.toLowerCase().includes(query.trim().toLowerCase())).length : 0;
 
   const rebuild = (root: string) => buildNetwork(root);
@@ -53,7 +65,7 @@ export function FullNetwork() {
     <div className="page page-wide">
       <PageHead
         title="Full network"
-        sub="Every folder at once, each top-level branch in its own color. Hover to trace a branch, click to select, scroll to zoom."
+        sub="Every folder at once as one living web, each top-level branch in its own color. Hover to trace a path, drag to rearrange, scroll to zoom."
         actions={
           <>
             <button type="button" className="btn" onClick={() => setGraphMode("graph")}>
@@ -83,7 +95,15 @@ export function FullNetwork() {
         <section className="card graph-card">
           {net && !building ? (
             <>
-              <NetworkView network={net} selected={selected} query={query} onSelect={setSelected} onOpen={(id) => api.reveal(net.nodes[id].path)} />
+              <ForceGraph
+                nodes={gnodes}
+                selected={selected === null ? null : String(selected)}
+                emphasis={emphasis}
+                onNodeClick={(g) => setSelected(Number(g.id))}
+                onNodeOpen={(g) => g.kind !== "more" && api.reveal(net.nodes[Number(g.id)].path)}
+                tooltip={tooltip}
+                fitKey={net.root}
+              />
               <div className="fg-search input-icon">
                 <Search />
                 <input className="input" placeholder="Find a folder" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === "Escape" && setQuery("")} />

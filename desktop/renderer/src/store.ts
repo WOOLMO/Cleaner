@@ -350,7 +350,7 @@ export async function buildNetwork(root: string) {
   setGraph({ mode: "network", building: { root, files: 0, bytes: 0, current: "", startedAt: Date.now() } });
   const off = api.onNetworkEvent((ev) => store.set((s) => ({ graph: { ...s.graph, building: s.graph.building ? { ...s.graph.building, ...ev } : null } })));
   try {
-    const r = await api.graphNetwork({ root });
+    const r = await api.graphNetwork({ root, budget: 2500 });
     if (r.ok) setGraph({ network: r.network });
     else if (r.cancelled) setGraph({ mode: store.get().graph.network ? "network" : "graph" });
     else toast("error", "Could not map every folder", r.error);

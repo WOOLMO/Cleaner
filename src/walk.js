@@ -4,6 +4,11 @@ import path from "node:path";
 // File lookups per folder are done in chunks, so a folder with 100,000 files (WinSxS) doesn't flood memory.
 const STAT_CHUNK = 256;
 
+// OneDrive (and other cloud drives) keep "online-only" files as placeholders: the size is real but nothing
+// is stored on disk. Opening one makes Windows download it, so content checks must skip them.
+// Tiny files can live inside the file table with no blocks either, hence the 4 KB floor.
+export const notLocal = (st) => st.size > 4096 && st.blocks === 0;
+
 // Reads one folder: its subfolders, and its files with size and modified time. Links and junctions are skipped,
 // so a link that points back up the tree can never cause a loop.
 // light: only totals (bytes, count, newest) instead of one object per file. Used for sizing.
@@ -35,7 +40,7 @@ export async function readDir(dir, { light = false } = {}) {
           count++;
           if (st.mtimeMs > newest) newest = st.mtimeMs;
         } else {
-          files.push({ name, path: p, size: st.size, mtimeMs: st.mtimeMs });
+          files.push({ name, path: p, size: st.size, mtimeMs: st.mtimeMs, blocks: st.blocks });
         }
       }, () => {});
     }));

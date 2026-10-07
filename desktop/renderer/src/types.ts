@@ -439,7 +439,7 @@ export interface CleanerApi {
   undoOrganize(id: string): Promise<{ restored: number; skipped: number; run: OrganizeRun }>;
   graphLoad(request: { root: string }): Promise<{ ok: true; tree: GraphNode }>;
   graphExpand(path: string): Promise<{ children: GraphNode[]; error?: string }>;
-  graphNetwork(request: { root: string }): Promise<{ ok: true; network: FolderNetwork } | { ok: false; cancelled?: boolean; error?: string }>;
+  graphNetwork(request: { root: string; budget?: number }): Promise<{ ok: true; network: FolderNetwork } | { ok: false; cancelled?: boolean; error?: string }>;
   graphNetworkCancel(): Promise<boolean>;
   onNetworkEvent(fn: (ev: { type: "map"; files: number; bytes: number; current: string }) => void): () => void;
   protectStatus(): Promise<ProtectStatus>;

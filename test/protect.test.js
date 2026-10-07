@@ -115,6 +115,12 @@ test("injection and keylogging imports, writable code and packing are recognised
   assert.ok(ids(p).includes("hidden-imports"));
 });
 
+test("UPX compression counts once, not as packed and self-rewriting code too", () => {
+  const upx = parsePE(buildPE({ imports: { "kernel32.dll": ["LoadLibraryA", "GetProcAddress", "VirtualProtect", "ExitProcess", "Sleep"] }, random: true, write: true, sectionName: "UPX1" }));
+  const v = judge(facts({ pe: upx }));
+  assert.deepEqual(ids(v).filter((x) => ["upx", "packed-code", "writable-code"].includes(x)), ["upx"]);
+});
+
 test("a valid signature quiets the weak signals but not the deceptive ones", () => {
   const nasty = parsePE(buildPE({ imports: { "kernel32.dll": ["VirtualAllocEx", "WriteProcessMemory", "CreateRemoteThread"] } }));
   const signed = judge(facts({ pe: nasty }), { signer: { status: "valid", subject: "Contoso" } });
@@ -188,10 +194,25 @@ test("file selection looks at risky types anywhere and sniffs documents where do
   assert.equal(isCandidate("tool.exe", "D:\\Games\\tool.exe"), "risky");
   assert.equal(isCandidate("photo.jpg", "C:\\Users\\alex\\Downloads\\photo.jpg"), "sniff");
   assert.equal(isCandidate("photo.jpg", "C:\\Users\\alex\\Pictures\\photo.jpg"), null);
+  // libraries and JavaScript only count where downloads land, not inside installed apps and editors
+  assert.equal(isCandidate("ffmpeg.dll", "C:\\Users\\alex\\AppData\\Local\\Discord\\app-1.0\\ffmpeg.dll"), null);
+  assert.equal(isCandidate("index.js", "C:\\Users\\alex\\.vscode\\extensions\\x\\index.js"), null);
+  assert.equal(isCandidate("version.dll", "C:\\Users\\alex\\Downloads\\tool\\version.dll"), "risky");
+  assert.equal(isCandidate("invoice.js", "C:\\Users\\alex\\Downloads\\invoice.js"), "risky");
   assert.ok(placeOf("C:\\Users\\alex\\AppData\\Local\\Temp\\a.exe").temp);
   assert.ok(placeOf("C:\\Users\\alex\\OneDrive\\Bureau\\a.exe").desktop);
   const quick = scanPlan("quick", { home: sandbox, env: {} });
   assert.ok(quick.every((j) => fs.existsSync(j.dir)));
+});
+
+test("online-only cloud files are recognised so they are never opened", async () => {
+  const { notLocal } = await import("../src/walk.js");
+  assert.equal(notLocal({ size: 5_000_000, blocks: 0 }), true, "a OneDrive placeholder: a size, but nothing on disk");
+  assert.equal(notLocal({ size: 5_000_000, blocks: 9768 }), false);
+  assert.equal(notLocal({ size: 300, blocks: 0 }), false, "tiny files can live in the file table");
+  const real = path.join(sandbox, "real.bin");
+  fs.writeFileSync(real, Buffer.alloc(64 * 1024, 1));
+  assert.equal(notLocal(fs.statSync(real)), false, "a normal file on this disk is local");
 });
 
 test("hash lists: EICAR is built in, user lists add to it, trust is remembered", () => {

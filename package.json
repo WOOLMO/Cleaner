@@ -1,6 +1,6 @@
 {
   "name": "cleaner-ai",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Finds files you don't need on Windows, has Gemini double-check them, and removes them only when you say y.",
   "type": "module",
   "bin": {

@@ -3,6 +3,7 @@ import fsp from "node:fs/promises";
 import crypto from "node:crypto";
 import path from "node:path";
 import { parsePE, importSet } from "./pe.js";
+import { notLocal } from "./walk.js";
 
 // Looks at one file the way an analyst would: what it really is, where it sits, where it came from,
 // what it imports and what text it carries. Every finding has a weight and a plain-language label.
@@ -24,7 +25,11 @@ const PE_QUIET_EXT = new Set(["tmp", "bin", "dat", "", "old", "bak", "dmp", "ax"
 const PACKER_SECTIONS = new Set([".themida", ".winlice", ".vmp0", ".vmp1", ".vmp2", ".enigma1", ".enigma2", ".aspack", ".adata", ".mpress1", ".mpress2", ".petite", ".nsp0", ".nsp1", ".perplex", "pebundle", ".boom", ".ccg", ".charmve", ".yp"]);
 
 const MAX_STRINGS = 8 * 1024 * 1024;
-const MAX_HASH = 256 * 1024 * 1024;
+// Malware is almost always small; huge installers and game archives are not fingerprinted (it would take hours).
+const MAX_HASH = 64 * 1024 * 1024;
+// Libraries load into a program rather than running on their own; outside the places downloads land
+// they are almost always part of an installed app.
+const LIBRARY_EXT = new Set(["dll", "sys", "ocx", "drv", "efi", "mui", "node", "pyd", "ax", "acm", "tsp", "winmd", "xll", "msstyles"]);
 
 export function extOf(name) {
   const m = /\.([^.\\/]+)$/.exec(name);
@@ -101,11 +106,18 @@ export async function sha256File(filePath, size, signal) {
 export async function examine(filePath, { size, mtime, signal } = {}) {
   const name = path.basename(filePath);
   const ext = extOf(name);
-  const facts = { path: filePath, name, ext, size: size ?? 0, mtime: mtime ?? 0, kind: "other", pe: null, hits: {}, macro: false, pdf: null, zone: readZone(filePath), sha256: null, error: null };
+  const facts = { path: filePath, name, ext, size: size ?? 0, mtime: mtime ?? 0, kind: "other", pe: null, hits: {}, macro: false, pdf: null, zone: null, sha256: null, error: null, cloudOnly: false };
   let fd;
   try {
+    const st = fs.statSync(filePath);
+    if (size === undefined) facts.size = st.size;
+    // Never open an online-only OneDrive file: Windows would download it. Its name is still judged.
+    if (notLocal(st)) {
+      facts.cloudOnly = true;
+      return facts;
+    }
+    facts.zone = readZone(filePath);
     fd = fs.openSync(filePath, "r");
-    if (size === undefined) facts.size = fs.fstatSync(fd).size;
     const head = Buffer.alloc(Math.min(4096, facts.size));
     fs.readSync(fd, head, 0, head.length, 0);
     const magic = head.subarray(0, 8).toString("hex");
@@ -123,7 +135,7 @@ export async function examine(filePath, { size, mtime, signal } = {}) {
     // Office containers are only opened for macros when they are Office files; a .zip archive is not read.
     const office = MACRO_EXT.has(ext) || /^(docx|xlsx|pptx|dotx|xltx)$/.test(ext);
     const want = facts.kind === "script" || facts.kind === "lnk" ? Math.min(facts.size, 2 * 1024 * 1024)
-      : facts.kind === "pe" || facts.kind === "dos" || facts.kind === "pdf" ? Math.min(facts.size, MAX_STRINGS)
+      : facts.kind === "pe" || facts.kind === "dos" || facts.kind === "pdf" ? Math.min(facts.size, LIBRARY_EXT.has(ext) ? 2 * 1024 * 1024 : MAX_STRINGS)
       : facts.kind === "msi" ? Math.min(facts.size, 4 * 1024 * 1024)
       : (facts.kind === "zip" || facts.kind === "ole") && office ? Math.min(facts.size, 24 * 1024 * 1024)
       : 0;
@@ -216,11 +228,13 @@ export function judge(facts, { signer = null, autostart = null } = {}) {
   if (isPE && facts.pe) {
     const pe = facts.pe;
     const names = pe.sections.map((s) => s.name.toLowerCase());
+    const upx = names.includes("upx0") || names.includes("upx1");
     if (names.some((n) => PACKER_SECTIONS.has(n))) add("protector", 2, "Wrapped in a commercial protector that hides its code", names.find((n) => PACKER_SECTIONS.has(n)));
-    else if (names.includes("upx0") || names.includes("upx1")) add("upx", 1, "Compressed with UPX (used by tools and malware alike)");
+    else if (upx) add("upx", 1, "Compressed with UPX (used by tools and malware alike)");
+    // UPX unpacks itself into a writable, high-entropy section by design, so it is counted once, above.
     const hot = pe.sections.find((s) => s.exec && s.entropy > 7.3 && s.rawSize > 4096);
-    if (hot && !pe.dotnet) add("packed-code", 2, "Its code section looks encrypted or compressed", `${hot.name || "(unnamed)"} entropy ${hot.entropy.toFixed(2)}`);
-    if (pe.sections.some((s) => s.exec && s.write)) add("writable-code", 2, "Has code that can rewrite itself while running");
+    if (hot && !pe.dotnet && !upx) add("packed-code", 2, "Its code section looks encrypted or compressed", `${hot.name || "(unnamed)"} entropy ${hot.entropy.toFixed(2)}`);
+    if (!upx && pe.sections.some((s) => s.exec && s.write)) add("writable-code", 2, "Has code that can rewrite itself while running");
     const imp = importSet(pe);
     const has = (...f) => f.some((x) => imp.has(x));
     if (has("virtualallocex") && has("writeprocessmemory") && has("createremotethread", "ntcreatethreadex", "rtlcreateuserthread", "queueuserapc", "setthreadcontext")) {
@@ -275,8 +289,12 @@ export function judge(facts, { signer = null, autostart = null } = {}) {
 // Whether a file deserves a closer look at all.
 export function isCandidate(name, filePath) {
   const ext = extOf(name);
-  if (RISKY_EXT.has(ext)) return "risky";
   const place = placeOf(filePath);
+  const landing = place.downloads || place.desktop || place.temp || place.startup || place.publicUser;
+  // Libraries and JavaScript are everywhere inside installed apps and editors; they only count where
+  // downloads land. (A .js file double-clicked from Downloads runs through Windows Script Host.)
+  if (LIBRARY_EXT.has(ext) || ext === "js" || ext === "jse") return landing ? "risky" : null;
+  if (RISKY_EXT.has(ext)) return "risky";
   if ((place.downloads || place.desktop || place.temp || place.startup) && (DISGUISE_EXT.has(ext) || /[‮]/.test(name))) return "sniff";
   if (place.startup) return "startup";
   return null;

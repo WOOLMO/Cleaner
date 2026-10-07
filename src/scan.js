@@ -3,7 +3,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { walk, treeSize } from "./walk.js";
+import { walk, treeSize, notLocal } from "./walk.js";
 
 const DAY = 86_400_000;
 const MB = 1024 * 1024;
@@ -328,7 +328,8 @@ export async function scan(roots, opts = {}) {
       if (rule) add({ kind: "file", path: f.path, size: f.size, mtime: f.mtimeMs, ...rule });
       else if (f.size >= largeBytes) add({ kind: "file", path: f.path, size: f.size, mtime: f.mtimeMs, category: "large-file", verdict: "unknown", reason: "Large file" });
       const ext = path.extname(f.name).toLowerCase();
-      if (f.size >= dupeMin && dupeEligible(lower, ext)) {
+      // online-only cloud files are never hashed: reading them would download them
+      if (f.size >= dupeMin && !notLocal(f) && dupeEligible(lower, ext)) {
         if (!bySize.has(f.size)) bySize.set(f.size, []);
         bySize.get(f.size).push({ p: f.path, mtime: f.mtimeMs, contained });
       }

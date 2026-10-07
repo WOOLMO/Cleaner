@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { notLocal } from "./walk.js";
 
 const MB = 1024 * 1024;
 
@@ -59,6 +60,8 @@ export function inspectFile(filePath, size, { allowPreview }) {
   const out = { fileType: null, preview: null, sensitive: isSensitiveName(path.basename(filePath)) };
   let buf;
   try {
+    // An online-only OneDrive file would be downloaded by opening it; judge it by its name alone.
+    if (notLocal(fs.statSync(filePath))) return { ...out, cloudOnly: true };
     const fd = fs.openSync(filePath, "r");
     try {
       buf = Buffer.alloc(Math.min(4096, size));

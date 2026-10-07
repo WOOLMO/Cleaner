@@ -529,7 +529,8 @@ export function registerIpc() {
       }
     }
     graphRoot = root;
-    const network = engine.buildNetwork(map, { budget: 5000 });
+    // The web graph stays smooth up to a few thousand folders; the biggest branches get the budget.
+    const network = engine.buildNetwork(map, { budget: Math.max(300, Math.min(5000, Number(request?.budget) || 2500)) });
     log.info("folder network built", { root, nodes: network.nodes.length });
     return { ok: true, network };
   });

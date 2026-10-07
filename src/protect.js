@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { walk } from "./walk.js";
+import { walk, notLocal } from "./walk.js";
 import { examine, judge, isCandidate, placeOf, PE_EXT } from "./threat-rules.js";
 import { listAutostart, winlogonOdd } from "./autostart.js";
 import { loadBlocklist, loadTrusted, checkSignatures, defenderStatus, defenderScan, malwareBazaar, virusTotal } from "./reputation.js";
@@ -137,6 +137,7 @@ export async function runThreatScan({
   const jobs = scanPlan(mode, { roots, desktop });
   const candidates = new Map();
   let filesSeen = 0;
+  let cloudOnly = 0;
   let lastEmit = 0;
   await walk(jobs, (job, listing) => {
     if (!listing) return null;
@@ -144,7 +145,13 @@ export async function runThreatScan({
     for (const f of listing.files) {
       if (candidates.size >= MAX_CANDIDATES) break;
       const why = isCandidate(f.name, f.path);
-      if (why) candidates.set(f.path.toLowerCase(), { path: f.path, size: f.size, mtime: f.mtimeMs, why, autostart: null });
+      if (!why) continue;
+      // online-only OneDrive files stay in the cloud: opening them would download them
+      if (notLocal(f)) {
+        cloudOnly++;
+        continue;
+      }
+      candidates.set(f.path.toLowerCase(), { path: f.path, size: f.size, mtime: f.mtimeMs, why, autostart: null });
     }
     const now = Date.now();
     if (now - lastEmit > 120) {
@@ -369,6 +376,7 @@ export async function runThreatScan({
     stats: {
       filesSeen,
       inspected: list.length,
+      cloudOnly,
       programs: facts.filter((f) => f?.kind === "pe").length,
       signed: [...signers.values()].filter((s) => s.status === "valid").length,
       startups: startups.length,
