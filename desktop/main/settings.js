@@ -13,6 +13,8 @@ export const DEFAULT_SETTINGS = {
   exclude: [],
   targets: [],
   watch: true,
+  autoUpdate: true,
+  welcomed: false,
 };
 
 const isAbsoluteList = (v) => Array.isArray(v) && v.length <= 200 && v.every((p) => typeof p === "string" && path.isAbsolute(p));
@@ -25,6 +27,8 @@ const RULES = {
   exclude: isAbsoluteList,
   targets: isAbsoluteList,
   watch: (v) => typeof v === "boolean",
+  autoUpdate: (v) => typeof v === "boolean",
+  welcomed: (v) => typeof v === "boolean",
 };
 
 // Unknown keys and invalid values are dropped, never stored.

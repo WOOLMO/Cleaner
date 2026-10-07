@@ -146,6 +146,8 @@ export interface Settings {
   exclude: string[];
   targets: string[];
   watch: boolean;
+  autoUpdate: boolean;
+  welcomed: boolean;
 }
 
 export interface SettingsView {
@@ -471,6 +473,18 @@ export interface FolderNetwork {
   shown: number;
 }
 
+export interface UpdateState {
+  enabled: boolean; // false when running from source
+  selfInstall: boolean; // the installed app updates itself; the zip copy only says a new version is out
+  status: "idle" | "checking" | "current" | "available" | "downloading" | "ready" | "error";
+  version: string | null;
+  percent: number | null;
+  error: string | null;
+  checkedAt: string | null;
+  current: string;
+  releases: string;
+}
+
 export interface CleanerApi {
   info(): Promise<AppInfo>;
   drives(): Promise<Drive[]>;
@@ -533,6 +547,10 @@ export interface CleanerApi {
   onWatchEvent(fn: (e: WatchEvent) => void): () => void;
   watchQuarantine(id: number): Promise<WatchEvent[]>;
   watchDismiss(id: number): Promise<WatchEvent[]>;
+  updateState(): Promise<UpdateState>;
+  checkUpdate(): Promise<UpdateState>;
+  installUpdate(): Promise<boolean>;
+  onUpdateEvent(fn: (s: Omit<UpdateState, "current" | "releases">) => void): () => void;
 }
 
 export interface WindowApi {

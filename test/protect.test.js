@@ -10,7 +10,7 @@ import crypto from "node:crypto";
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "cleaner-protect-"));
 process.env.CLEANER_HOME = path.join(sandbox, "data");
 const { parsePE, entropy, importSet } = await import("../src/pe.js");
-const { judge, indicatorHits, searchable, PATTERNS, isCandidate, placeOf } = await import("../src/threat-rules.js");
+const { judge, examine, indicatorHits, searchable, PATTERNS, isCandidate, placeOf } = await import("../src/threat-rules.js");
 const { parseCommand, winlogonOdd } = await import("../src/autostart.js");
 const { EICAR_SHA256, loadBlocklist, parseDefenderOutput, malwareBazaar, virusTotal, trustHash, loadTrusted } = await import("../src/reputation.js");
 const { quarantineFile, listQuarantine, restoreQuarantined, deleteQuarantined } = await import("../src/quarantine.js");
@@ -274,6 +274,55 @@ test("quarantine scrambles a file and restores it exactly", () => {
   deleteQuarantined(again.id);
   assert.equal(listQuarantine().length, 0);
   assert.throws(() => restoreQuarantined("../../etc"), /ENOENT|unknown/);
+});
+
+test("noise rules: document shortcuts are normal, and one weak sign is not a notice", () => {
+  const recent = judge(facts({ kind: "lnk", ext: "lnk", name: "photo.png.lnk", path: "C:\\Users\\alex\\AppData\\Roaming\\Microsoft\\Windows\\Recent\\photo.png.lnk", lnkRuns: null }));
+  assert.equal(recent.level, "clean", "Windows names its Recent-items shortcuts like this");
+  const trick = judge(facts({ kind: "lnk", ext: "lnk", name: "invoice.pdf.lnk", lnkRuns: "powershell" }));
+  assert.ok(ids(trick).includes("double-extension"), "a document-named shortcut that runs a shell is still a trick");
+  const debuggerLike = parsePE(buildPE({ imports: { "kernel32.dll": ["VirtualAllocEx", "WriteProcessMemory", "CreateRemoteThread"] } }));
+  assert.equal(judge(facts({ pe: debuggerLike, path: "D:\\Tools\\dbg.exe" })).level, "clean", "injection imports alone are everyday debuggers and games");
+  const updater = judge(facts({ path: "D:\\Tools\\update.exe", pe: parsePE(buildPE()), hits: { downloadExec: 1 } }));
+  assert.equal(updater.level, "clean", "programs that can download files are normal");
+});
+
+test("a real shortcut file on disk is recognized as a shortcut", async () => {
+  // the shell link header: size 0x4C, then the link CLSID 00021401-0000-0000-C000-000000000046
+  const header = Buffer.from("4c0000000114020000000000c000000000000046", "hex");
+  const plain = path.join(sandbox, "photo.png.lnk");
+  fs.writeFileSync(plain, Buffer.concat([header, Buffer.alloc(200), Buffer.from("C:\\Users\\alex\\Pictures\\photo.png", "utf16le")]));
+  const doc = await examine(plain, { size: fs.statSync(plain).size });
+  assert.equal(doc.kind, "lnk");
+  assert.equal(doc.lnkRuns, null);
+  assert.equal(judge(doc).level, "clean");
+  const shell = path.join(sandbox, "invoice.pdf.lnk");
+  fs.writeFileSync(shell, Buffer.concat([header, Buffer.alloc(200), Buffer.from("C:\\Windows\\System32\\cmd.exe /c start x", "utf16le")]));
+  const trick = await examine(shell, { size: fs.statSync(shell).size });
+  assert.equal(trick.lnkRuns, "cmd.exe");
+  assert.ok(ids(judge(trick)).includes("double-extension"));
+});
+
+test("code projects keep their own scripts, and a second scan reuses fingerprints", async () => {
+  const root = path.join(sandbox, "project");
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  fs.writeFileSync(path.join(root, "package.json"), "{}");
+  fs.writeFileSync(path.join(root, "src", "tool.js"), `// ${PATTERNS.wsh[0]} ${PATTERNS.downloadExec[0]}`);
+  fs.writeFileSync(path.join(root, "build.cmd"), "@echo build\r\n");
+  const opts = { mode: "custom", roots: [root], autostart: false, useDefender: false, online: false, behavior: false, useYara: false, run: async () => "[]" };
+  const first = await runThreatScan(opts);
+  assert.equal(first.stats.inspected, 1, "the project's .js source is skipped, its .cmd is still looked at");
+  const cacheFile = path.join(process.env.CLEANER_HOME, "file-cache.json");
+  const cache = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
+  const key = path.join(root, "build.cmd").toLowerCase();
+  assert.match(cache[key].sha256, /^[a-f0-9]{64}$/);
+  // poison the cached fingerprint: an unchanged file reuses it instead of hashing again
+  cache[key].sha256 = "ab".repeat(32);
+  fs.writeFileSync(cacheFile, JSON.stringify(cache));
+  fs.writeFileSync(path.join(process.env.CLEANER_HOME, "blocklist.txt"), `${"ab".repeat(32)} Cached.Fingerprint\n`);
+  const second = await runThreatScan(opts);
+  assert.equal(second.results[0]?.detections[0]?.name, "Cached.Fingerprint");
+  fs.rmSync(path.join(process.env.CLEANER_HOME, "blocklist.txt"));
 });
 
 test("a full scan of a folder: clean files stay quiet, a blocklisted file is a threat", async () => {

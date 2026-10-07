@@ -1,6 +1,6 @@
 // Sample data for demo mode and the browser preview. Everything here is made up; nothing touches a disk.
 import type {
-  AppInfo, AuditEntry, CleanerApi, Drive, Entry, Explanation, Held, MapChildren, MapResult, ScanEvent, ScanResult, SettingsView,
+  AppInfo, AuditEntry, CleanerApi, Drive, Entry, Explanation, Held, MapChildren, MapResult, ScanEvent, ScanResult, SettingsView, UpdateState,
 } from "./types";
 import { extraMock } from "./mock-extra";
 import { protectMock } from "./mock-protect";
@@ -131,7 +131,7 @@ function makeMap(): MapResult {
 let map: MapResult | null = { ...makeMap(), explained, explainedBy: "gemini-3.5-flash-lite" };
 
 let settings: SettingsView = {
-  settings: { theme: "system", aiEnabled: true, previews: true, maxAi: 400, largeMB: 200, exclude: [`${HOME}\\Documents\\Taxes`], targets: [HOME], watch: true },
+  settings: { theme: "system", aiEnabled: true, previews: true, maxAi: 400, largeMB: 200, exclude: [`${HOME}\\Documents\\Taxes`], targets: [HOME], watch: true, autoUpdate: true, welcomed: Boolean(window.cleanerWindow?.capture) },
   locks: {},
   policy: { managed: false, organization: null, excludePaths: [], error: null, source: "C:\\ProgramData\\Cleaner\\policy.json" },
   allowPermanentDelete: true,
@@ -158,9 +158,11 @@ const SAMPLE_PATHS = [
   `${HOME}\\Videos\\Recordings`,
 ];
 
+let update: UpdateState = { enabled: true, selfInstall: true, status: "current", version: null, percent: null, error: null, checkedAt: new Date(Date.now() - 2 * 3600_000).toISOString(), current: "1.4.0", releases: "https://github.com/WOOLMO/Cleaner/releases/latest" };
+
 export const mockApi: CleanerApi = {
   async info(): Promise<AppInfo> {
-    return { version: "1.3.0", engineVersion: "1.3.0", electron: "44.6.0", dataDir: `${HOME}\\AppData\\Local\\cleaner`, auditFile: `${HOME}\\AppData\\Local\\cleaner\\audit.jsonl`, policyFile: "C:\\ProgramData\\Cleaner\\policy.json", logFile: `${HOME}\\AppData\\Local\\cleaner\\logs\\desktop.log`, user: "alex", machine: "ALEX-PC", home: HOME };
+    return { version: "1.4.0", engineVersion: "1.4.0", electron: "44.6.0", dataDir: `${HOME}\\AppData\\Local\\cleaner`, auditFile: `${HOME}\\AppData\\Local\\cleaner\\audit.jsonl`, policyFile: "C:\\ProgramData\\Cleaner\\policy.json", logFile: `${HOME}\\AppData\\Local\\cleaner\\logs\\desktop.log`, user: "alex", machine: "ALEX-PC", home: HOME };
   },
   async drives(): Promise<Drive[]> {
     return [
@@ -299,6 +301,20 @@ export const mockApi: CleanerApi = {
   async exportActivity() {
     activity = [...activity];
     return { ok: true, file: `${HOME}\\Documents\\cleaner-activity.csv` };
+  },
+  async updateState() {
+    return update;
+  },
+  async checkUpdate() {
+    await wait(900);
+    update = { ...update, status: "current", checkedAt: new Date().toISOString() };
+    return update;
+  },
+  async installUpdate() {
+    return false;
+  },
+  onUpdateEvent() {
+    return () => {};
   },
   ...extraMock,
   ...protectMock,

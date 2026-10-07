@@ -1,0 +1,38 @@
+name: release
+
+# Pushing a tag like v1.4.0 builds the Windows installer and zip, and publishes them as a GitHub release.
+# The installed app checks these releases for updates (latest.yml carries each installer's SHA-512).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: The tag matches the app version
+        shell: bash
+        run: test "v$(node -p "require('./desktop/package.json').version")" = "$GITHUB_REF_NAME"
+      - name: Engine tests
+        run: node --test test/*.test.js
+      - run: npm ci
+        working-directory: desktop
+      - run: npm run typecheck
+        working-directory: desktop
+      - name: End-to-end tests
+        run: npm run e2e
+        working-directory: desktop
+      - name: Build and publish
+        run: npm run dist -- --publish always
+        working-directory: desktop
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

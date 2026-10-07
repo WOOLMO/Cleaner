@@ -1,10 +1,10 @@
 import { useState } from "react";
-import { Building2, CircleCheck, ExternalLink, FolderOpen, FolderPlus, KeyRound, LoaderCircle, Monitor, Moon, ShieldCheck, Sun, TriangleAlert, X } from "lucide-react";
+import { Building2, CircleCheck, Download, ExternalLink, FolderOpen, FolderPlus, KeyRound, LoaderCircle, Monitor, Moon, RefreshCw, RotateCcw, ShieldCheck, Sun, TriangleAlert, X } from "lucide-react";
 import { api } from "../api";
-import { errorMessage, saveSettings, store, toast, useStore } from "../store";
+import { checkUpdate, errorMessage, installUpdate, saveSettings, store, toast, useStore } from "../store";
 import { PageHead, Segmented, Toggle } from "../components/ui";
 import { shortPath } from "../format";
-import type { Theme } from "../types";
+import type { Theme, UpdateState } from "../types";
 
 const POLICY_EXAMPLE = `{
   "organization": "Contoso IT",
@@ -234,6 +234,8 @@ export function SettingsPage() {
             </div>
           </section>
 
+          <UpdatesCard autoUpdate={settings.autoUpdate} />
+
           <section className="card">
             <div className="card-head">
               <h2>About</h2>
@@ -263,5 +265,74 @@ export function SettingsPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+function updateLine(u: UpdateState): string {
+  const when = u.checkedAt ? new Date(u.checkedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : null;
+  switch (u.status) {
+    case "checking":
+      return "Checking GitHub for a new version...";
+    case "downloading":
+      return `Downloading ${u.version}${u.percent ? `, ${u.percent}%` : ""}. You can keep working.`;
+    case "ready":
+      return `Version ${u.version} is downloaded. It installs when you close Cleaner.`;
+    case "available":
+      return `Version ${u.version} is out. This copy runs from a zip, so download the new one from GitHub.`;
+    case "error":
+      return `The last check failed: ${u.error ?? "unknown error"}`;
+    case "current":
+      return `You have the latest version${when ? `, checked ${when}` : ""}.`;
+    default:
+      return u.enabled ? "Not checked yet." : "Updates are off when Cleaner runs from source.";
+  }
+}
+
+function UpdatesCard({ autoUpdate }: { autoUpdate: boolean }) {
+  const u = useStore((s) => s.update);
+  if (!u) return null;
+  const busy = u.status === "checking" || u.status === "downloading";
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h2>Updates</h2>
+        <span className={`badge ${u.status === "ready" || u.status === "available" ? "green" : ""}`} style={{ marginLeft: "auto" }}>
+          {u.status === "ready" || u.status === "available" ? `${u.version} available` : u.current}
+        </span>
+      </div>
+      <div className="card-body" style={{ display: "grid", gap: 12 }}>
+        <div className="keybox">
+          {u.status === "error" ? <TriangleAlert style={{ color: "var(--amber)" }} /> : busy ? <LoaderCircle className="spin" /> : u.status === "ready" || u.status === "available" ? <Download style={{ color: "var(--accent)" }} /> : <CircleCheck style={{ color: "var(--accent)" }} />}
+          <span style={{ flex: 1, minWidth: 0 }}>{updateLine(u)}</span>
+        </div>
+        {u.status === "downloading" && u.percent !== null && (
+          <div className="update-bar" role="progressbar" aria-valuenow={u.percent} aria-valuemin={0} aria-valuemax={100}>
+            <i style={{ width: `${u.percent}%` }} />
+          </div>
+        )}
+        <Toggle label="Check for updates automatically" checked={autoUpdate} onChange={(v) => saveSettings({ autoUpdate: v })} desc="Every few hours, from the project's GitHub releases. The download is checked against its published SHA-512 before it runs." />
+        <div style={{ display: "flex", gap: 8 }}>
+          {u.status === "ready" ? (
+            <button type="button" className="btn sm primary" onClick={installUpdate}>
+              <RotateCcw />
+              Restart and update
+            </button>
+          ) : u.status === "available" ? (
+            <button type="button" className="btn sm primary" onClick={() => api.openExternal(u.releases)}>
+              <Download />
+              Download {u.version}
+            </button>
+          ) : (
+            <button type="button" className="btn sm" disabled={!u.enabled || busy} onClick={checkUpdate}>
+              <RefreshCw className={u.status === "checking" ? "spin" : undefined} />
+              Check now
+            </button>
+          )}
+          <button type="button" className="btn sm ghost" onClick={() => api.openExternal(u.releases)}>
+            Release notes
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }

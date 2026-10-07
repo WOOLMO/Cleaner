@@ -5,6 +5,7 @@ import { app, BrowserWindow, ipcMain, Menu, nativeTheme, session, shell } from "
 import { registerIpc } from "./ipc.js";
 import { readSettings } from "./settings.js";
 import { startWatch } from "./watch.js";
+import { startUpdater } from "./updater.js";
 import { log } from "./log.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -13,6 +14,8 @@ const DEMO = process.argv.includes("--demo") || process.env.CLEANER_DEMO === "1"
 const CAPTURE_DIR = process.env.CLEANER_CAPTURE_DIR;
 
 app.setAppUserModelId("io.github.woolmo.cleaner");
+// End-to-end tests run beside a real window in their own browser profile, which also gives them their own instance lock.
+if (process.env.CLEANER_PROFILE) app.setPath("userData", process.env.CLEANER_PROFILE);
 // Screenshot mode runs beside a real window: its own browser profile, and no single-instance lock.
 if (CAPTURE_DIR) app.setPath("userData", path.join(app.getPath("temp"), "cleaner-capture-profile"));
 else if (!app.requestSingleInstanceLock()) app.quit();
@@ -108,6 +111,7 @@ app.whenReady().then(() => {
   createWindow();
   // watch mode runs while the app is open, on real data only
   if (!DEMO && !CAPTURE_DIR && readSettings().watch) startWatch();
+  if (!DEMO && !CAPTURE_DIR) startUpdater({ onState: (s) => win && !win.isDestroyed() && win.webContents.send("update:event", s) });
 });
 
 app.on("second-instance", () => {

@@ -81,5 +81,9 @@ if (process.argv.includes("--cleaner-demo")) {
     watchQuarantine: invoke("protect:watchQuarantine"),
     watchDismiss: invoke("protect:watchDismiss"),
     clearServiceKey: invoke("keys:clear"),
+    updateState: invoke("update:state"),
+    checkUpdate: invoke("update:check"),
+    installUpdate: invoke("update:install"),
+    onUpdateEvent: listen("update:event"),
   });
 }

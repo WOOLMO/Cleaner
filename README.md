@@ -50,16 +50,20 @@ Cleaner comes as a **desktop app** and a **command line tool**. Both run the sam
 
 ## Desktop app
 
-Download `Cleaner-Setup-1.3.0.exe` (installer) or `Cleaner-1.3.0-win-x64.zip` (no install: unzip anywhere outside AppData and run `Cleaner.exe`) from [Releases](https://github.com/WOOLMO/Cleaner/releases), or build them yourself:
+Download `Cleaner-Setup-1.4.0.exe` (installer) or `Cleaner-1.4.0-win-x64.zip` (no install: unzip anywhere outside AppData and run `Cleaner.exe`) from [Releases](https://github.com/WOOLMO/Cleaner/releases/latest), or build them yourself:
 
 ```powershell
 git clone https://github.com/WOOLMO/Cleaner
 cd Cleaner\desktop
 npm install
-npm run dist        # release\1.3.0\Cleaner-Setup-1.3.0.exe and the zip
+npm run dist        # release\1.4.0\Cleaner-Setup-1.4.0.exe and the zip
 ```
 
 The builds are not code-signed yet, so Windows SmartScreen may ask you to confirm the first launch.
+
+**Updates install themselves.** The installed app checks this repository's releases every few hours, downloads a new version in the background, checks it against the SHA-512 published with the release, and installs it when you close the app (or right away from Settings). The zip copy tells you when a new version is out. Turn checking off in Settings.
+
+The first launch opens a short welcome that points to the four tools: Clean, Protect, Organize and Map.
 
 | Page | What it does |
 |---|---|
@@ -124,7 +128,7 @@ A second opinion you run when you want, next to the antivirus that protects you 
 | **Gemini** | An optional second opinion on flagged files, from names and findings only. |
 | **Watch mode** | While Cleaner is open, new files in Downloads, Desktop and Startup are checked the moment they land, and new startup entries every ten minutes, with a Windows notification. |
 
-Only hard evidence makes a file a **threat**: a known-bad hash, an antivirus engine, a strong YARA rule, a malware-site download or a botnet connection. The rules and Gemini can only make it **suspicious**, always with plain-language reasons. Online-only OneDrive files are never opened, so a scan never downloads them. Quarantine scrambles a file so it can't run, and restores it exactly.
+Only hard evidence makes a file a **threat**: a known-bad hash, an antivirus engine, a strong hand-written YARA rule, a malware-site download or a botnet connection. The rules and Gemini can only make it **suspicious**, always with plain-language reasons. Machine-made YARA rules (yara-signator), which also match ordinary compiler code, only count as a weak sign, and a valid digital signature overrules a YARA-only verdict. A repeat scan reuses the fingerprints and signatures of files that have not changed, so it is much faster. Online-only OneDrive files are never opened, so a scan never downloads them. Quarantine scrambles a file so it can't run, and restores it exactly.
 
 <table>
   <tr>
@@ -249,10 +253,13 @@ cd desktop
 npm install
 npm run dev                       # the app with hot reload
 npm run typecheck
+npm run e2e                       # drives the real app: demo data and an empty real profile
 npm start -- --demo               # the app on built-in sample data, touches nothing
 ```
 
-The engine tests build a fake user folder full of traps (junction loops, `.git` folders, global npm tools, names with apostrophes and emoji, duplicates in Backup folders) and throwaway folders to organize and undo. The screenshots in this README come from demo mode, which runs on made-up sample data.
+The engine tests build a fake user folder full of traps (junction loops, `.git` folders, global npm tools, names with apostrophes and emoji, duplicates in Backup folders) and throwaway folders to organize and undo. The end-to-end tests launch the built Electron app with Playwright, click through every page, and boot it once on a throwaway real profile to check the bridge, the settings and that the window cannot reach Node.js. The screenshots in this README come from demo mode, which runs on made-up sample data.
+
+**Releasing.** Bump the version in `desktop/package.json` and `package.json`, update `desktop/build/release-notes.md`, then push a tag such as `v1.4.0`. GitHub Actions runs every test, builds the installer and zip, and publishes the release that installed apps update from.
 
 ## License
 

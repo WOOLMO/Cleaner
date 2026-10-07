@@ -17,6 +17,25 @@ import { snapshot, analyzeBehavior } from "./behavior.js";
 // rules and Gemini can only make something "suspicious" or a "notice", always with reasons.
 
 export const LAST_THREAT_SCAN = path.join(DATA_DIR, "last-threat-scan.json");
+const FILE_CACHE = path.join(DATA_DIR, "file-cache.json");
+
+// Fingerprints and signatures of files already looked at, keyed by path; reused while size and date match.
+function loadFileCache() {
+  try {
+    return new Map(Object.entries(JSON.parse(fs.readFileSync(FILE_CACHE, "utf8"))));
+  } catch {
+    return new Map();
+  }
+}
+function saveFileCache(cache) {
+  try {
+    const entries = [...cache.entries()].slice(-80_000);
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(FILE_CACHE, JSON.stringify(Object.fromEntries(entries)), "utf8");
+  } catch {
+    // a cache that cannot be written only costs speed next time
+  }
+}
 
 export function saveThreatScan(result) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -34,6 +53,8 @@ export function readThreatScan() {
 const SKIP_DIRS = /^(\$recycle\.bin|system volume information|windowsapps|winsxs|servicing|installer)$/i;
 const DEV_DIRS = new Set(["node_modules", ".git", "__pycache__", "site-packages", ".venv", "venv", ".cargo", ".rustup", ".gradle", ".m2", ".nuget", ".npm", ".pnpm-store", ".yarn", ".tox", ".mypy_cache", ".pytest_cache"]);
 const MAX_CANDIDATES = 60_000;
+const PROJECT_FILES = /^(package\.json|tsconfig\.json|pyproject\.toml|cargo\.toml|go\.mod|pom\.xml|build\.gradle|composer\.json|gemfile)$/i;
+const SOURCE_EXT = /\.(js|jse|mjs|cjs|ts|tsx|jsx)$/i;
 const CONCURRENCY = 8;
 
 export function scanPlan(mode, { home = os.homedir(), desktop = null, roots = [], env = process.env } = {}) {
@@ -166,10 +187,13 @@ export async function runThreatScan({
   await walk(jobs, (job, listing) => {
     if (!listing) return null;
     filesSeen += listing.files.length;
+    const project = job.project || listing.dirs.some((d) => d.name === ".git") || listing.files.some((f) => PROJECT_FILES.test(f.name));
     for (const f of listing.files) {
       if (candidates.size >= MAX_CANDIDATES) break;
       const why = isCandidate(f.name, f.path);
       if (!why) continue;
+      // source files in a code project are the owner's own code, not something that landed there
+      if (project && SOURCE_EXT.test(f.name)) continue;
       // online-only OneDrive files stay in the cloud: opening them would download them
       if (notLocal(f)) {
         cloudOnly++;
@@ -185,7 +209,7 @@ export async function runThreatScan({
     if (job.depth <= 0) return null;
     return listing.dirs
       .filter((d) => !SKIP_DIRS.test(d.name) && (includeDev || !DEV_DIRS.has(d.name.toLowerCase())))
-      .map((d) => ({ dir: d.path, depth: job.depth - 1 }));
+      .map((d) => ({ dir: d.path, depth: job.depth - 1, project }));
   }, { signal });
 
   for (const s of startups) {
@@ -209,8 +233,11 @@ export async function runThreatScan({
   const list = [...candidates.values()];
   const facts = new Array(list.length);
   let done = 0;
+  const cache = loadFileCache();
   await pool(list, CONCURRENCY, async (c, i) => {
-    facts[i] = await examine(c.path, { size: c.size, mtime: c.mtime, signal });
+    const known = cache.get(c.path.toLowerCase());
+    const fresh = known && known.size === c.size && known.mtime === c.mtime;
+    facts[i] = await examine(c.path, { size: c.size, mtime: c.mtime, signal, sha256: fresh ? known.sha256 ?? undefined : undefined });
     done++;
     if (done % 25 === 0 || done === list.length) onEvent({ type: "inspect", done, total: list.length, current: c.path });
   }, signal);
@@ -223,14 +250,28 @@ export async function runThreatScan({
     .filter(({ c, f, p }) => (f.kind === "pe" || ["msi", "ps1", "psm1"].includes(f.ext)) && (p.score >= 2 || c.autostart || c.why !== "risky" || isUserPlace(c.path)))
     .slice(0, 4000)
     .map(({ c }) => c.path);
-  let signers = new Map();
+  // signatures we already checked for this exact file (same size and date) are reused
+  const signers = new Map();
+  const toCheck = [];
+  for (const p of needSig) {
+    const c = candidates.get(p.toLowerCase());
+    const known = cache.get(p.toLowerCase());
+    if (known?.signer && known.size === c.size && known.mtime === c.mtime) signers.set(p.toLowerCase(), known.signer);
+    else toCheck.push(p);
+  }
   try {
-    signers = await checkSignatures(needSig, { run, signal });
+    for (const [k, v] of await checkSignatures(toCheck, { run, signal })) signers.set(k, v);
   } catch (err) {
     if (signal?.aborted) throw err;
     errors.push(`signatures: ${err.message}`);
   }
-  onEvent({ type: "signatures", checked: signers.size });
+  onEvent({ type: "signatures", checked: signers.size, reused: needSig.length - toCheck.length });
+  list.forEach((c, i) => {
+    const key = c.path.toLowerCase();
+    // big files are not fingerprinted, but their signature (slow to check) is still worth remembering
+    if (facts[i].sha256 || signers.has(key)) cache.set(key, { size: c.size, mtime: c.mtime, sha256: facts[i].sha256 ?? null, signer: signers.get(key) ?? cache.get(key)?.signer ?? null });
+  });
+  saveFileCache(cache);
 
   // 5. Verdicts from the rules, then hard evidence.
   const items = list.map((c, i) => {
@@ -279,15 +320,23 @@ export async function runThreatScan({
     onEvent({ type: "phase", phase: "yara" });
     const targets = items.filter((it) => !it.f.cloudOnly && !it.f.error && it.f.size > 0 && it.f.size <= 64 * 1024 * 1024);
     try {
-      const hits = await scanYara(targets.map((it) => it.c.path), { signal });
+      const hits = await scanYara(targets.map((it) => it.c.path), { signal, onProgress: (done, total) => onEvent({ type: "yara", done, total }) });
+      if (hits.skipped) errors.push(`yara: ${hits.skipped} files were not checked in time`);
       const byFile = new Map(items.map((it) => [it.c.path.toLowerCase(), it]));
       for (const h of hits) {
         const it = byFile.get(h.file.toLowerCase());
         if (!it) continue;
         const name = `${h.rule.replace(/_/g, " ")}${h.description ? `: ${h.description}` : ""}`;
-        // YARA Forge scores its rules 0-100; strong rules are evidence, weaker ones a warning sign
-        if (h.score === null || h.score >= 75) it.detections.push({ source: "yara", name });
-        else it.findings.push({ id: `yara:${h.rule}`, weight: h.score >= 60 ? 5 : 3, label: `Matches the YARA rule ${h.rule}`, detail: h.description, counted: true });
+        const signed = it.signer?.status === "valid";
+        if (h.auto) {
+          // machine-made rules: a weak hint, once per file, and none at all for properly signed programs
+          if (!it.findings.some((f) => f.id === "yara-auto")) it.findings.push({ id: "yara-auto", weight: 3, label: `Shares code with ${familyOf(h.rule)} malware (a machine-made rule that can also match common library code)`, detail: h.rule, counted: !signed });
+        } else if ((h.score === null || h.score >= 75) && !signed) {
+          // YARA Forge scores its rules 0-100; strong hand-written rules are evidence
+          it.detections.push({ source: "yara", name });
+        } else if (!it.findings.some((f) => f.id === `yara:${h.rule}`)) {
+          it.findings.push({ id: `yara:${h.rule}`, weight: h.score === null || h.score >= 60 ? 5 : 3, label: `Matches the YARA rule ${h.rule}${signed ? " (but it is properly signed)" : ""}`, detail: h.description, counted: true });
+        }
       }
       for (const it of items) rescore(it);
       onEvent({ type: "yara", done: targets.length, total: targets.length });
@@ -502,7 +551,12 @@ export async function runThreatScan({
 // Score = the counted warning signs plus outside opinions (Gemini, known-good lists), never below zero.
 function rescore(it) {
   it.score = Math.max(0, it.findings.filter((f) => f.counted).reduce((s, f) => s + f.weight, 0) + (it.adjust ?? 0));
-  it.level = it.score >= 6 ? "suspicious" : it.score >= 3 ? "notice" : "clean";
+  it.level = it.score >= 6 ? "suspicious" : it.score >= 4 ? "notice" : "clean";
+}
+
+// MALPEDIA_Win_Triback_Loader_Auto -> Triback Loader
+function familyOf(rule) {
+  return rule.replace(/^MALPEDIA_(Win|Elf|Osx|Apk|Jar|Js|Ps1|Py|Vbs)_/i, "").replace(/_Auto$/i, "").replace(/_/g, " ");
 }
 
 function isUserPlace(p) {

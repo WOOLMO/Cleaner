@@ -3,7 +3,7 @@ import { api } from "./api";
 import { formatSize, setHome } from "./format";
 import type {
   AppInfo, AuditEntry, Drive, FolderNetwork, GraphNode, Held, MapResult, OrganizePlace, OrganizePlan, OrganizeRun, ProtectStatus, Quarantined, ScanEvent, ScanResult,
-  ServiceName, SettingsView, ThreatEvent, ThreatScan, WatchEvent,
+  ServiceName, SettingsView, ThreatEvent, ThreatScan, UpdateState, WatchEvent,
 } from "./types";
 
 export type Page = "overview" | "scan" | "protect" | "organize" | "map" | "graph" | "holding" | "activity" | "settings";
@@ -65,6 +65,7 @@ export interface State {
   activity: AuditEntry[];
   toasts: Toast[];
   palette: boolean;
+  update: UpdateState | null;
   org: {
     places: OrganizePlace[];
     root: string | null;
@@ -115,6 +116,7 @@ let state: State = {
   activity: [],
   toasts: [],
   palette: false,
+  update: null,
   org: { places: [], root: null, plan: null, planning: false, applying: false, run: null, history: [] },
   graph: { root: null, tree: null, loading: false, expanding: null, mode: "graph", network: null, building: null },
   protect: { status: null, scan: null, running: false, progress: null, quarantine: [], focus: null, tab: "findings", setup: null, watch: [] },
@@ -158,6 +160,7 @@ export async function boot() {
   store.set({ info, settings, drives, scan, map, held, activity, ready: true });
   // Protection status asks Defender through PowerShell, so it loads after the window is up.
   loadProtect().catch(() => {});
+  api.updateState().then((update) => store.set({ update })).catch(() => {});
 }
 
 export const refreshDrives = async () => store.set({ drives: await api.drives() });
@@ -555,6 +558,31 @@ export async function setServiceKey(name: ServiceName, key: string) {
 }
 export async function clearServiceKey(name: ServiceName) {
   setProtect({ status: await api.clearServiceKey(name) });
+}
+
+// ---- updates ----
+api.onUpdateEvent((u) => {
+  const prev = store.get().update;
+  store.set({ update: { current: prev?.current ?? "", releases: prev?.releases ?? "", ...u } });
+  if (u.status === prev?.status) return;
+  if (u.status === "ready") toast("ok", `Cleaner ${u.version} is ready`, "It installs when you close the app, or restart now from Settings.");
+  else if (u.status === "available") toast("info", `Cleaner ${u.version} is out`, "Download it from Settings, under Updates.");
+});
+
+export async function checkUpdate() {
+  store.set((s) => ({ update: s.update && { ...s.update, status: "checking", error: null } }));
+  try {
+    const update = await api.checkUpdate();
+    store.set({ update });
+    if (update.status === "current") toast("ok", "Cleaner is up to date", `You have the latest version, ${update.current}.`);
+    else if (update.status === "error") toast("error", "Could not check for updates", update.error ?? undefined);
+  } catch (err) {
+    toast("error", "Could not check for updates", message(err));
+  }
+}
+
+export async function installUpdate() {
+  if (!(await api.installUpdate())) toast("error", "The update is not ready yet");
 }
 
 export async function saveSettings(patch: Parameters<typeof api.setSettings>[0]) {

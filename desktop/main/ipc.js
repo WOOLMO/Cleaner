@@ -7,6 +7,7 @@ import { effectiveSettings, writeSettings } from "./settings.js";
 import { getKey, saveKey, clearKey, keyStatus } from "./secrets.js";
 import { log } from "./log.js";
 import { startWatch, stopWatch, watchEvents, watching, markEvent } from "./watch.js";
+import { updateState, checkForUpdates, installUpdate, RELEASES_URL } from "./updater.js";
 
 const LAST_SCAN = path.join(engine.DATA_DIR, "last-scan.json");
 const LAST_MAP = path.join(engine.DATA_DIR, "last-map.json");
@@ -761,5 +762,14 @@ export function registerIpc() {
     fs.writeFileSync(r.filePath, body, "utf8");
     shell.showItemInFolder(r.filePath);
     return { ok: true, file: r.filePath };
+  });
+
+  // ---- updates ----
+  handle("update:state", () => ({ ...updateState(), current: app.getVersion(), releases: RELEASES_URL }));
+  handle("update:check", async () => ({ ...(await checkForUpdates()), current: app.getVersion(), releases: RELEASES_URL }));
+  handle("update:install", () => {
+    const ok = installUpdate();
+    if (ok) engine.audit("update", { app: "desktop", changed: [`update to ${updateState().version}`] });
+    return ok;
   });
 }

@@ -158,7 +158,7 @@ export function inspectArchive(file) {
 }
 
 // Gathers the facts about one file. Reads at most a few megabytes, never runs anything.
-export async function examine(filePath, { size, mtime, signal } = {}) {
+export async function examine(filePath, { size, mtime, signal, sha256 } = {}) {
   const name = path.basename(filePath);
   const ext = extOf(name);
   const facts = { path: filePath, name, ext, size: size ?? 0, mtime: mtime ?? 0, kind: "other", pe: null, hits: {}, macro: false, pdf: null, zone: null, sha256: null, error: null, cloudOnly: false };
@@ -180,7 +180,7 @@ export async function examine(filePath, { size, mtime, signal } = {}) {
       facts.kind = "pe";
       facts.pe = parsePE(fd, facts.size);
       if (!facts.pe) facts.kind = "dos";
-    } else if (magic.startsWith("4c0000000114020000")) facts.kind = "lnk";
+    } else if (magic.startsWith("4c00000001140200")) facts.kind = "lnk";
     else if (magic.startsWith("504b0304")) facts.kind = "zip";
     else if (magic.startsWith("d0cf11e0")) facts.kind = ext === "msi" ? "msi" : "ole";
     else if (magic.startsWith("25504446")) facts.kind = "pdf";
@@ -237,7 +237,7 @@ export async function examine(filePath, { size, mtime, signal } = {}) {
   }
   if (!facts.error) {
     try {
-      facts.sha256 = await sha256File(filePath, facts.size, signal);
+      facts.sha256 = sha256 ?? (await sha256File(filePath, facts.size, signal));
       // Test files like EICAR may carry trailing spaces or a newline; hash tiny files without them too.
       if (facts.size <= 128) {
         const body = fs.readFileSync(filePath).toString("latin1").replace(/[\s\x00]+$/, "");
@@ -263,7 +263,9 @@ export function judge(facts, { signer = null, autostart = null } = {}) {
 
   // Names built to fool people.
   if (/[‮‭‎‏]/.test(facts.name)) add("rtlo", 6, "Uses a hidden character to fake its file extension", null, { evenIfSigned: true });
-  if (/\.(pdf|docx?|xlsx?|pptx?|txt|rtf|jpe?g|png|gif|mp[34]|avi|mov|zip|rar|7z|csv)(\s|_)*\.(exe|scr|com|pif|bat|cmd|js|jse|vbs|vbe|hta|lnk|msi|wsf|ps1)$/i.test(facts.name)) {
+  // Windows names its own Recent-items shortcuts "photo.png.lnk"; a shortcut only fakes a document when it runs a command.
+  const documentShortcut = facts.ext === "lnk" && facts.kind === "lnk" && !facts.lnkRuns;
+  if (!documentShortcut && /\.(pdf|docx?|xlsx?|pptx?|txt|rtf|jpe?g|png|gif|mp[34]|avi|mov|zip|rar|7z|csv)(\s|_)*\.(exe|scr|com|pif|bat|cmd|js|jse|vbs|vbe|hta|lnk|msi|wsf|ps1)$/i.test(facts.name)) {
     add("double-extension", 5, "Hides a program behind a document name", facts.name, { evenIfSigned: true });
   } else if (/\s{6,}\.\w+$/.test(facts.name)) add("padded-name", 4, "Pads its name with spaces to hide the real extension", null, { evenIfSigned: true });
 
@@ -327,7 +329,8 @@ export function judge(facts, { signer = null, autostart = null } = {}) {
   if (h.browserData && (scriptLike ? exfil : h.browserData >= 2 || exfil)) add("stealer", 3, "Refers to saved browser passwords and cookies", null);
   if (h.wallets) add("wallets", 2, "Refers to cryptocurrency wallet files");
   if (h.messaging) add("messaging-tokens", 3, "Refers to Discord or Telegram sessions or bot webhooks");
-  if (h.downloadExec && facts.kind !== "msi") add("download-exec", scriptLike ? 3 : 2, "Downloads and runs code from the internet");
+  // Installers and updaters name download functions too, so inside a compiled program it is a weak sign.
+  if (h.downloadExec && facts.kind !== "msi") add("download-exec", scriptLike ? 3 : 1, scriptLike ? "Downloads and runs code from the internet" : "Contains code to download files from the internet");
   if (h.evasion) add("evasion", 4, "Turns off security features or deletes backups", null, { evenIfSigned: true });
   if (h.ransom >= 2) add("ransom-note", 4, "Contains ransom note wording", null, { evenIfSigned: true });
   if (scriptLike && h.hidden) add("hidden-window", 1, "Runs with its window hidden");
@@ -368,7 +371,8 @@ export function judge(facts, { signer = null, autostart = null } = {}) {
     f.counted = !trusted || f.evenIfSigned;
     if (f.counted) score += f.weight;
   }
-  return { findings, score, level: score >= 6 ? "suspicious" : score >= 3 ? "notice" : "clean" };
+  // a notice needs at least two warning signs; one alone is everyday software
+  return { findings, score, level: score >= 6 ? "suspicious" : score >= 4 ? "notice" : "clean" };
 }
 
 // Whether a file deserves a closer look at all.

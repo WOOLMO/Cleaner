@@ -52,7 +52,11 @@ function run(file, args, { timeoutMs = 120_000, signal } = {}) {
     const child = spawn(file, args, { windowsHide: true });
     let out = "";
     let err = "";
-    const timer = setTimeout(() => child.kill(), timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, timeoutMs);
     const onAbort = () => child.kill();
     signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout.setEncoding("utf8").on("data", (d) => (out += d));
@@ -65,7 +69,7 @@ function run(file, args, { timeoutMs = 120_000, signal } = {}) {
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
       if (signal?.aborted) reject(signal.reason);
-      else resolve({ code, out, err });
+      else resolve({ code, out, err, timedOut });
     });
   });
 }
@@ -130,20 +134,34 @@ export function parseYaraOutput(text) {
     const m = /^(\w+)\s+\[(.*)\]\s+([a-z]:\\.+)$/i.exec(line.trim()) ?? /^(\w+)\s+()([a-z]:\\.+)$/i.exec(line.trim());
     if (!m) continue;
     const meta = {};
-    for (const kv of m[2].matchAll(/(\w+)=(?:"((?:[^"\\]|\\.)*)"|([^,\]]+))/g)) meta[kv[1]] = kv[2] ?? kv[3];
-    hits.push({ rule: m[1], file: m[3], score: Number(meta.score) || null, description: meta.description ?? null, author: meta.author ?? null });
+    // yara writes strings as key="value" and numbers as key =80
+    for (const kv of m[2].matchAll(/(\w+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^,\]]+))/g)) meta[kv[1]] = kv[2] ?? kv[3].trim();
+    // yara-signator rules are machine-made from code sequences and also match ordinary compiler and runtime code
+    const auto = /yara-signator/i.test(`${meta.tool ?? ""} ${meta.author ?? ""} ${meta.description ?? ""}`);
+    hits.push({ rule: m[1], file: m[3], score: Number(meta.score) || null, description: meta.description ?? null, author: meta.author ?? null, auto });
   }
   return hits;
 }
 
-export async function scanYara(files, { signal, timeoutMs = 10 * 60_000 } = {}) {
-  if (!files.length || !yaraStatus().ready) return [];
+// Scans in batches, so one slow batch (a huge file, a busy disk) costs only that batch and progress can be shown.
+// Hits found before a batch runs out of time are kept; `skipped` counts the files in batches that did.
+export async function scanYara(files, { signal, batch = 1500, batchTimeoutMs = 4 * 60_000, onProgress } = {}) {
+  const hits = [];
+  hits.skipped = 0;
+  if (!files.length || !yaraStatus().ready) return hits;
   const list = path.join(YARA_DIR, `scan-${process.pid}.txt`);
-  fs.writeFileSync(list, files.join("\r\n"), "utf8");
   try {
-    // flags, then the compiled rules, then the file that lists what to scan
-    const r = await run(exe("yara64.exe"), ["-w", "-N", "-m", "-p", "4", "-a", "30", "-C", "--scan-list", path.join(YARA_DIR, "rules.yarc"), list], { timeoutMs, signal });
-    return parseYaraOutput(r.out);
+    for (let i = 0; i < files.length; i += batch) {
+      const part = files.slice(i, i + batch);
+      // The Windows build reads its scan list as UTF-16 without a byte order mark; UTF-8 is silently misread.
+      fs.writeFileSync(list, Buffer.from(part.join("\r\n") + "\r\n", "utf16le"));
+      // flags, then the compiled rules, then the file that lists what to scan
+      const r = await run(exe("yara64.exe"), ["-w", "-N", "-m", "-p", "4", "-a", "30", "-C", "--scan-list", path.join(YARA_DIR, "rules.yarc"), list], { timeoutMs: batchTimeoutMs, signal });
+      hits.push(...parseYaraOutput(r.out));
+      if (r.timedOut) hits.skipped += part.length;
+      onProgress?.(Math.min(i + batch, files.length), files.length);
+    }
+    return hits;
   } finally {
     fs.rmSync(list, { force: true });
   }

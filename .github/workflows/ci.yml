@@ -34,8 +34,7 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
       - run: npm ci
-        env:
-          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
       - run: node scripts/sync-core.mjs
       - run: npm run typecheck
-      - run: npm run build:ui
+      - name: End-to-end tests of the real app (demo data and an empty real profile)
+        run: npm run e2e

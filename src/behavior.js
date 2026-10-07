@@ -110,7 +110,7 @@ export function judgeProcess(p, { parent = null, signer = null, connections = []
   if (listening.length && shady && file && !lower.startsWith(WINDIR)) add("listens", 2, `Waits for incoming connections on port ${listening.map((c) => c.lport).slice(0, 3).join(", ")}`);
 
   const score = findings.reduce((s, f) => s + f.weight, 0);
-  const severity = detections.length ? "threat" : score >= 6 ? "suspicious" : score >= 3 ? "notice" : "clean";
+  const severity = detections.length ? "threat" : score >= 6 ? "suspicious" : score >= 4 ? "notice" : "clean";
   return { findings, detections, score, severity, external: external.length, listening: listening.map((c) => c.lport) };
 }
 

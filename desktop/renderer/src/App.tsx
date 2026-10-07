@@ -3,6 +3,7 @@ import { boot, buildNetwork, go, loadGraph, planOrganize, setProtect, startScan,
 import { TitleBar, Rail } from "./components/Shell";
 import { Palette } from "./components/Palette";
 import { BrandMark, Toasts } from "./components/ui";
+import { Welcome } from "./components/Welcome";
 import { Overview } from "./pages/Overview";
 import { ScanPage } from "./pages/Scan";
 import { SpaceMap } from "./pages/SpaceMap";
@@ -100,6 +101,8 @@ function useCaptureNavigation() {
         } else if (target === "protect-startup") {
           store.set({ page: "protect" });
           setProtect({ tab: "startup", focus: null });
+        } else if (target === "welcome") {
+          store.set((s) => ({ settings: s.settings && { ...s.settings, settings: { ...s.settings.settings, welcomed: false } } }));
         } else if (target === "protect-running") startThreatScan("quick");
         else if (target === "palette") store.set({ palette: true });
         else go(target as Page);
@@ -134,6 +137,7 @@ export function App() {
         <Current />
       </main>
       <Palette />
+      <Welcome />
       <Toasts />
     </div>
   );
