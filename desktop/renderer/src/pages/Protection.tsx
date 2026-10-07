@@ -1,34 +1,40 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
-  ArrowUpRight, Check, ChevronDown, ChevronRight, CircleMinus, Clock, ExternalLink, FileWarning, Fingerprint, FolderOpen, Globe, Info, KeyRound, LoaderCircle,
-  Lock, Power, Radar, ScanSearch, ShieldAlert, ShieldCheck, ShieldX, Sparkles, Trash2, Undo2, X,
+  Activity, ArrowUpRight, Check, ChevronDown, ChevronRight, CircleMinus, Clock, Cpu, Download, ExternalLink, Eye, FileWarning, Fingerprint, FolderOpen, Globe,
+  HardDriveDownload, Info, KeyRound, LoaderCircle, Lock, Power, Radar, RefreshCw, ScanSearch, ShieldAlert, ShieldCheck, ShieldX, Sparkles, Trash2, Undo2, X,
 } from "lucide-react";
 import { api } from "../api";
 import {
-  cancelThreatScan, clearServiceKey, deleteQuarantine, loadProtect, lookupItem, quarantineItems, restoreQuarantine, setProtect, setServiceKey, startThreatScan,
-  trustItem, useStore, type ThreatProgress,
+  cancelThreatScan, clearServiceKey, deleteQuarantine, endProcess, loadProtect, lookupItem, quarantineItems, restoreQuarantine, saveSettings, setProtect, setServiceKey,
+  setupYara, startThreatScan, trustItem, updateIntel, useStore, watchDismiss, watchQuarantine, type ThreatProgress,
 } from "../store";
 import { Checkbox, Dialog, Empty, PageHead, Segmented } from "../components/ui";
 import { baseName, dirName, displayRoot, duration, formatCount, formatSize, shortPath, timeAgo } from "../format";
-import type { ProtectStatus, ServiceName, Severity, StartupEntry, ThreatResult, ThreatScan } from "../types";
+import type { LiveProcess, ProtectStatus, ServiceName, Severity, StartupEntry, ThreatResult, ThreatScan } from "../types";
 
 const SEV: Record<Severity, { label: string; icon: ReactNode; badge: string }> = {
   threat: { label: "Threat", icon: <ShieldX size={18} />, badge: "red" },
   suspicious: { label: "Suspicious", icon: <ShieldAlert size={18} />, badge: "amber" },
   notice: { label: "Notice", icon: <Info size={18} />, badge: "" },
 };
-const SOURCE: Record<string, string> = { hash: "Known-bad hash list", defender: "Microsoft Defender", malwarebazaar: "MalwareBazaar", virustotal: "VirusTotal" };
+const SOURCE: Record<string, string> = {
+  hash: "Known-bad hash list", defender: "Microsoft Defender", malwarebazaar: "MalwareBazaar", virustotal: "VirusTotal", "malwarebazaar-feed": "MalwareBazaar feed",
+  urlhaus: "URLhaus", loldrivers: "LOLDrivers", yara: "YARA (YARA Forge)", hashlookup: "CIRCL hashlookup", feodo: "Feodo Tracker",
+};
 const STARTUP_SOURCE: Record<StartupEntry["source"], string> = {
   registry: "Run key", "startup-folder": "Startup folder", task: "Scheduled task", service: "Service", winlogon: "Winlogon", debugger: "Debugger hijack", wmi: "WMI event",
 };
 const PHASES: { id: ThreatProgress["phase"]; label: string }[] = [
+  { id: "intel", label: "Threat intel" },
   { id: "autostart", label: "Startup entries" },
   { id: "walk", label: "Finding files" },
   { id: "inspect", label: "Looking inside" },
   { id: "signatures", label: "Signatures" },
   { id: "defender", label: "Defender engine" },
+  { id: "yara", label: "YARA rules" },
   { id: "reputation", label: "Malware databases" },
   { id: "ai", label: "Gemini review" },
+  { id: "behavior", label: "Running programs" },
 ];
 const plural = (n: number, w: string) => `${formatCount(n)} ${w}${n === 1 ? "" : "s"}`;
 
@@ -72,6 +78,7 @@ export function Protection() {
       ) : (
         <>
           <Hero scan={p.scan} status={p.status} home={info?.home ?? ""} />
+          <WatchPanel />
           {p.scan ? <Tabs scan={p.scan} /> : null}
         </>
       )}
@@ -136,11 +143,41 @@ function Hero({ scan, status, home }: { scan: ThreatScan | null; status: Protect
 
 function Engines({ status, scan }: { status: ProtectStatus | null; scan: ThreatScan | null }) {
   const settings = useStore((s) => s.settings);
+  const setup = useStore((s) => s.protect.setup);
   const [keyFor, setKeyFor] = useState<ServiceName | null>(null);
+  const [confirmYara, setConfirmYara] = useState(false);
   const ai = Boolean(settings?.settings.aiEnabled && settings.key.hasKey);
+  const online = Boolean(settings?.settings.aiEnabled);
+  const feeds = status?.intel ? Object.values(status.intel) : [];
+  const loaded = feeds.filter((f) => f.count > 0);
+  const newest = loaded.map((f) => f.updated).filter(Boolean).sort().pop() ?? null;
+  const yara = status?.yara;
   const rows: { name: string; on: boolean; detail: string; action?: ReactNode }[] = [
-    { name: "Cleaner rules", on: true, detail: "Programs, scripts, shortcuts, macros, signatures" },
-    { name: "Known-bad hashes", on: true, detail: status ? `${formatCount(status.knownHashes)} hash${status.knownHashes === 1 ? "" : "es"}, plus your blocklist.txt` : "Built-in list and your blocklist.txt" },
+    { name: "Cleaner rules", on: true, detail: "Programs, scripts, shortcuts, zips, macros, signatures" },
+    {
+      name: "Open threat intel",
+      on: loaded.length > 0,
+      detail: loaded.length
+        ? `${loaded.length} feeds · ${formatCount(loaded.reduce((s, f) => s + f.count, 0))} entries · ${newest ? timeAgo(newest) : ""}`
+        : online ? "abuse.ch and LOLDrivers, downloaded on the next scan" : "Off: online checks are turned off",
+      action: (
+        <button type="button" className="btn sm ghost" disabled={Boolean(setup) || !online} onClick={() => updateIntel()}>
+          <RefreshCw />
+          Update
+        </button>
+      ),
+    },
+    {
+      name: "YARA rules",
+      on: Boolean(yara?.ready),
+      detail: yara?.ready ? `${formatCount(yara.rules?.count ?? 0)} YARA Forge rules · ${yara.rules?.release ?? ""}` : "The researchers' pattern engine, free",
+      action: (
+        <button type="button" className="btn sm ghost" disabled={Boolean(setup) || !online} onClick={() => (yara?.ready ? setupYara("update") : setConfirmYara(true))}>
+          {yara?.ready ? <RefreshCw /> : <Download />}
+          {yara?.ready ? "Update" : "Install"}
+        </button>
+      ),
+    },
     {
       name: "Microsoft Defender engine",
       on: Boolean(status?.defender.available),
@@ -149,9 +186,9 @@ function Engines({ status, scan }: { status: ProtectStatus | null; scan: ThreatS
     ...(["malwareBazaar", "virusTotal"] as ServiceName[]).map((name) => {
       const k = status?.keys[name];
       return {
-        name: name === "malwareBazaar" ? "MalwareBazaar" : "VirusTotal",
-        on: Boolean(k?.hasKey) && Boolean(settings?.settings.aiEnabled),
-        detail: k?.hasKey ? (settings?.settings.aiEnabled ? `Hash lookups on${name === "virusTotal" ? ", 4 a minute" : ""}` : "Off: online checks are turned off") : "Free key, sends hashes only",
+        name: name === "malwareBazaar" ? "MalwareBazaar lookups" : "VirusTotal lookups",
+        on: Boolean(k?.hasKey) && online,
+        detail: k?.hasKey ? (online ? `Hash lookups on${name === "virusTotal" ? ", 4 a minute" : ""}` : "Off: online checks are turned off") : "Free key, sends hashes only",
         action: (
           <button type="button" className="btn sm ghost" onClick={() => setKeyFor(name)}>
             <KeyRound />
@@ -160,13 +197,22 @@ function Engines({ status, scan }: { status: ProtectStatus | null; scan: ThreatS
         ),
       };
     }),
+    { name: "CIRCL hashlookup", on: online, detail: online ? "Known-good and known-bad files, by hash" : "Off: online checks are turned off" },
+    { name: "Behavior analysis", on: true, detail: "Running programs, connections, drivers" },
     { name: "Gemini second opinion", on: ai, detail: ai ? "Reviews flagged files by name and findings" : settings?.locks.aiEnabled ? "Turned off by your organization" : "Add a Gemini key in Settings" },
   ];
   return (
     <section className="card pr-engines">
       <div className="card-head">
         <h2>Engines</h2>
-        {scan?.engines.aiError && <span className="sub" title={scan.engines.aiError}>Gemini had a problem last time</span>}
+        {setup ? (
+          <span className="sub pr-setup">
+            <LoaderCircle size={12} className="spin" />
+            {setup}
+          </span>
+        ) : (
+          scan?.engines.aiError && <span className="sub" title={scan.engines.aiError}>Gemini had a problem last time</span>
+        )}
       </div>
       <ul>
         {rows.map((r) => (
@@ -181,6 +227,32 @@ function Engines({ status, scan }: { status: ProtectStatus | null; scan: ThreatS
         ))}
       </ul>
       {keyFor && <KeyDialog name={keyFor} status={status} onClose={() => setKeyFor(null)} />}
+      <Dialog
+        open={confirmYara}
+        onClose={() => setConfirmYara(false)}
+        tone="accent"
+        icon={<Download size={18} />}
+        title="Install YARA?"
+        body="Cleaner downloads VirusTotal's official YARA engine (about 2 MB) and the YARA Forge core rules (about 2 MB) from GitHub. Each file must match the checksum GitHub publishes for it, or nothing is installed."
+        footer={
+          <>
+            <button type="button" className="btn ghost" data-autofocus onClick={() => setConfirmYara(false)}>
+              Not now
+            </button>
+            <button
+              type="button"
+              className="btn primary"
+              onClick={() => {
+                setConfirmYara(false);
+                setupYara("install");
+              }}
+            >
+              <Download />
+              Download and install
+            </button>
+          </>
+        }
+      />
     </section>
   );
 }
@@ -241,6 +313,59 @@ function KeyDialog({ name, status, onClose }: { name: ServiceName; status: Prote
   );
 }
 
+// Watch mode: new files and new startup entries are checked while Cleaner is open.
+function WatchPanel() {
+  const settings = useStore((s) => s.settings);
+  const events = useStore((s) => s.protect.watch).filter((e) => e.status === "found");
+  const on = Boolean(settings?.settings.watch);
+  return (
+    <section className="card pr-watch">
+      <div className="pw-head">
+        <span className={`pw-pulse ${on ? "on" : ""}`}>
+          <Eye size={16} />
+        </span>
+        <div className="truncate">
+          <b>Watch mode</b>
+          <span className="muted truncate">
+            {on ? "Checking new files in Downloads, Desktop and Startup, and new startup entries, while Cleaner is open" : "Off: new files are only checked when you scan"}
+          </span>
+        </div>
+        <button type="button" className="switch" role="switch" aria-checked={on} aria-label="Watch for threats while Cleaner is open" onClick={() => saveSettings({ watch: !on })} />
+      </div>
+      {events.length > 0 && (
+        <ul className="pw-list">
+          {events.slice(0, 5).map((e) => (
+            <li key={e.id}>
+              <span className={`pg-ico ${e.severity === "clean" ? "" : e.severity}`}>{e.kind === "startup" ? <Power size={15} /> : <ShieldAlert size={15} />}</span>
+              <div className="truncate">
+                <div className="pl-name truncate">{e.name}</div>
+                <div className="pl-why truncate">
+                  {e.reason} · {timeAgo(e.time)}
+                </div>
+              </div>
+              <div className="pq-actions">
+                <button type="button" className="btn sm" onClick={() => api.reveal(e.path)}>
+                  <FolderOpen />
+                  Show
+                </button>
+                {e.kind === "file" && (
+                  <button type="button" className="btn sm danger" onClick={() => watchQuarantine(e.id)}>
+                    <Lock />
+                    Quarantine
+                  </button>
+                )}
+                <button type="button" className="btn sm ghost" onClick={() => watchDismiss(e.id)}>
+                  Dismiss
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 // ---------- running ----------
 function Running({ progress: pr }: { progress: ThreatProgress }) {
   const current = PHASES.findIndex((x) => x.id === pr.phase);
@@ -249,6 +374,9 @@ function Running({ progress: pr }: { progress: ThreatProgress }) {
     : pr.phase === "inspect" ? `${formatCount(pr.inspected)} of ${formatCount(pr.total)} inspected`
     : pr.phase === "signatures" ? "Checking who signed each program"
     : pr.phase === "autostart" ? "Reading Run keys, Startup folders, tasks and services"
+    : pr.phase === "intel" ? "Refreshing the open threat-intel feeds"
+    : pr.phase === "behavior" ? "Looking at running programs, connections and drivers"
+    : pr.phase === "yara" ? "Matching files against the YARA rules"
     : pr.step ? `${pr.step.done} of ${pr.step.total}` : "Working";
   const pct = pr.phase === "inspect" && pr.total ? pr.inspected / pr.total : null;
   return (
@@ -301,6 +429,7 @@ function Tabs({ scan }: { scan: ThreatScan }) {
   const quarantine = useStore((s) => s.protect.quarantine);
   const open = scan.results.filter((r) => r.status === "found");
   const flaggedStartups = scan.startups.filter((x) => x.severity !== "clean" && x.severity !== "missing").length;
+  const liveFlags = (scan.behavior?.processes.filter((p) => !p.ended).length ?? 0) + (scan.behavior?.drivers.length ?? 0);
   return (
     <>
       <div className="pr-tabs">
@@ -310,6 +439,7 @@ function Tabs({ scan }: { scan: ThreatScan }) {
           onChange={(t) => setProtect({ tab: t, focus: null })}
           options={[
             { value: "findings", label: "Findings", count: open.length },
+            { value: "live", label: "Running now", count: liveFlags },
             { value: "startup", label: "Starts with Windows", count: scan.startups.length },
             { value: "quarantine", label: "Quarantine", count: quarantine.length },
           ]}
@@ -317,6 +447,7 @@ function Tabs({ scan }: { scan: ThreatScan }) {
         {tab === "startup" && flaggedStartups > 0 && <span className="muted">{flaggedStartups === 1 ? "1 entry needs" : `${flaggedStartups} entries need`} a look</span>}
       </div>
       {tab === "findings" && <Findings scan={scan} />}
+      {tab === "live" && <RunningNow scan={scan} />}
       {tab === "startup" && <Startups scan={scan} />}
       {tab === "quarantine" && <QuarantineList />}
     </>
@@ -606,6 +737,149 @@ function Drawer({ r, onQuarantine }: { r: ThreatResult; onQuarantine: () => void
         )}
       </footer>
     </aside>
+  );
+}
+
+function RunningNow({ scan }: { scan: ThreatScan }) {
+  const live = scan.behavior;
+  const [end, setEnd] = useState<LiveProcess | null>(null);
+  if (!live) {
+    return (
+      <section className="card">
+        <Empty icon={<Activity size={22} />} title="No snapshot in this scan" body="Run a scan to see what is running right now." />
+      </section>
+    );
+  }
+  const flagged = live.processes;
+  return (
+    <>
+      <div className="pr-live-stats">
+        <span>
+          <b className="num">{formatCount(live.stats.processes)}</b> programs running
+        </span>
+        <span>
+          <b className="num">{formatCount(live.stats.external)}</b> internet connections from {live.stats.talkers} programs
+        </span>
+        <span>
+          <b className="num">{formatCount(live.stats.drivers)}</b> drivers loaded
+        </span>
+        <span className="faint">snapshot taken {timeAgo(scan.finishedAt)}</span>
+      </div>
+      {!flagged.length && !live.drivers.length ? (
+        <section className="card">
+          <Empty icon={<ShieldCheck size={22} />} title="Nothing running looks wrong" body="No fake system processes, no hidden encoded commands, no connections to known botnet servers, no abusable drivers." />
+        </section>
+      ) : null}
+      {flagged.length > 0 && (
+        <section className={`pr-group ${flagged.some((p) => p.severity === "threat") ? "threat" : "suspicious"}`}>
+          <header>
+            <span className={`pg-ico ${flagged.some((p) => p.severity === "threat") ? "threat" : "suspicious"}`}>
+              <Cpu size={18} />
+            </span>
+            <h2>Programs</h2>
+            <span className="muted">What they do, not just what they are</span>
+          </header>
+          <ul className="pr-list pr-procs">
+            {flagged.map((p) => (
+              <li key={p.pid} className={p.ended ? "handled" : ""}>
+                <span className={`pg-ico ${p.severity === "clean" ? "" : p.severity}`}>{p.severity === "threat" ? <ShieldX size={16} /> : <ShieldAlert size={16} />}</span>
+                <div className="truncate">
+                  <div className="pl-name truncate">
+                    {p.name}
+                    <span className="badge">pid {p.pid}</span>
+                    {p.ended && <span className="badge">Ended</span>}
+                  </div>
+                  <div className="pl-path mono truncate" title={p.path ?? ""}>
+                    {p.path ? shortPath(p.path) : "path hidden (needs admin rights)"}
+                    {p.parentName ? ` · started by ${p.parentName}` : ""}
+                  </div>
+                  <div className="pl-why truncate">
+                    {p.detections.length ? <b>{p.detections[0].name}</b> : p.findings.map((f) => f.label).join(" · ")}
+                  </div>
+                  {p.findings.find((f) => f.id === "encoded-command")?.detail && (
+                    <div className="pr-decoded mono truncate" title={p.findings.find((f) => f.id === "encoded-command")!.detail!}>
+                      decoded: {p.findings.find((f) => f.id === "encoded-command")!.detail}
+                    </div>
+                  )}
+                </div>
+                <div className="pq-actions">
+                  {p.path && (
+                    <button type="button" className="btn sm" onClick={() => api.reveal(p.path!)}>
+                      <FolderOpen />
+                      Show
+                    </button>
+                  )}
+                  {!p.ended && (
+                    <button type="button" className="btn sm danger" onClick={() => setEnd(p)}>
+                      <Power />
+                      End
+                    </button>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+      {live.drivers.length > 0 && (
+        <section className="pr-group suspicious">
+          <header>
+            <span className="pg-ico suspicious">
+              <HardDriveDownload size={18} />
+            </span>
+            <h2>Drivers</h2>
+            <span className="muted">Checked against LOLDrivers, the open list of abused drivers</span>
+          </header>
+          <ul className="pr-list pr-procs">
+            {live.drivers.map((d) => (
+              <li key={d.name}>
+                <span className={`pg-ico ${d.severity}`}>
+                  <ShieldAlert size={16} />
+                </span>
+                <div className="truncate">
+                  <div className="pl-name truncate">
+                    {d.display || d.name}
+                    <span className="badge">{d.name}</span>
+                  </div>
+                  <div className="pl-path mono truncate" title={d.path}>{d.path}</div>
+                  <div className="pl-why truncate">{d.label}</div>
+                </div>
+                <div className="pq-actions">
+                  <span className="faint" style={{ fontSize: 12, maxWidth: 220, whiteSpace: "normal" }}>
+                    Update or uninstall the app that installed it, or turn on Windows' vulnerable driver blocklist.
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+      <Dialog
+        open={Boolean(end)}
+        onClose={() => setEnd(null)}
+        tone="danger"
+        icon={<Power size={18} />}
+        title={`End ${end?.name ?? "this program"}?`}
+        body="Windows stops it right away. Unsaved work in it is lost. Quarantine its file afterwards so it cannot start again."
+        footer={
+          <>
+            <button type="button" className="btn ghost" data-autofocus onClick={() => setEnd(null)}>
+              Keep it running
+            </button>
+            <button
+              type="button"
+              className="btn danger solid"
+              onClick={() => {
+                if (end) endProcess(end.pid);
+                setEnd(null);
+              }}
+            >
+              End program
+            </button>
+          </>
+        }
+      />
+    </>
   );
 }
 

@@ -89,6 +89,14 @@ function useCaptureNavigation() {
         } else if (target === "protect-detail") {
           store.set({ page: "protect" });
           setProtect({ tab: "findings", focus: 3 });
+        } else if (target === "protect-watch") {
+          // a watch-mode notification was clicked
+          store.set({ page: "protect" });
+          setProtect({ tab: "findings", focus: null });
+        } else if (target === "protect-live") {
+          store.set({ page: "protect" });
+          setProtect({ tab: "live", focus: null });
+          setTimeout(() => document.querySelector(".pr-tabs")?.scrollIntoView({ block: "start" }), 300);
         } else if (target === "protect-startup") {
           store.set({ page: "protect" });
           setProtect({ tab: "startup", focus: null });

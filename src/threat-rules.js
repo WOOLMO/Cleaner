@@ -4,6 +4,8 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { parsePE, importSet } from "./pe.js";
 import { notLocal } from "./walk.js";
+import { listZip, readZipEntry } from "./zip.js";
+import { hostsIn } from "./intel.js";
 
 // Looks at one file the way an analyst would: what it really is, where it sits, where it came from,
 // what it imports and what text it carries. Every finding has a weight and a plain-language label.
@@ -102,6 +104,59 @@ export async function sha256File(filePath, size, signal) {
   return hash.digest("hex");
 }
 
+// UTF-16 text inside binaries and shortcuts, as plain text (case kept, so base64 survives).
+function squeeze(buf) {
+  const out = Buffer.allocUnsafe(buf.length);
+  let n = 0;
+  for (let i = 0; i < buf.length; i++) if (buf[i] !== 0) out[n++] = buf[i];
+  return out.toString("latin1", 0, n);
+}
+
+function mergeHits(into, more) {
+  for (const [k, v] of Object.entries(more)) into[k] = (into[k] ?? 0) + v;
+  return into;
+}
+
+// PowerShell -EncodedCommand payloads are base64 of UTF-16 text; decoding shows what really runs.
+export function decodeEncodedCommand(text) {
+  const m = /\s-(?:e|en|enc|enco|encod|encode|encoded|encodedc|encodedco|encodedcom|encodedcomm|encodedcomma|encodedcomman|encodedcommand)\s+["']?([A-Za-z0-9+/=]{16,})/i.exec(text ?? "");
+  if (!m) return null;
+  try {
+    const decoded = Buffer.from(m[1], "base64").toString("utf16le");
+    return /[\x00-\x08�]/.test(decoded.slice(0, 40)) ? null : decoded;
+  } catch {
+    return null;
+  }
+}
+
+const INNER_RISKY = /\.(exe|scr|com|pif|cpl|msi|bat|cmd|ps1|vbs|vbe|js|jse|wsf|hta|lnk|jar|iso|img|vhd|vhdx|reg|chm)$/i;
+const INNER_TEXT = /\.(bat|cmd|ps1|vbs|vbe|js|jse|wsf|hta|lnk|url|reg)$/i;
+
+export function inspectArchive(file) {
+  const list = listZip(file, { maxEntries: 5000 });
+  if (!list) return null;
+  const files = list.entries.filter((e) => !e.dir);
+  const risky = files.filter((e) => INNER_RISKY.test(e.name));
+  const out = {
+    files: files.length,
+    risky: risky.map((e) => e.name).slice(0, 20),
+    doubleExt: risky.filter((e) => /\.(pdf|docx?|xlsx?|jpe?g|png|txt|mp[34])\s*\.\w+$/i.test(e.name)).map((e) => e.name),
+    encrypted: files.some((e) => e.encrypted),
+    hits: {},
+    hosts: [],
+  };
+  for (const e of risky.filter((x) => INNER_TEXT.test(x.name)).slice(0, 12)) {
+    const data = readZipEntry(file, e, { maxBytes: 1024 * 1024 });
+    if (!data) continue;
+    const plain = squeeze(data);
+    const decoded = decodeEncodedCommand(plain);
+    mergeHits(out.hits, indicatorHits(searchable(Buffer.from(`${plain}\n${decoded ?? ""}`))));
+    out.hosts.push(...hostsIn(`${plain}\n${decoded ?? ""}`));
+  }
+  out.hosts = [...new Set(out.hosts)].slice(0, 20);
+  return out;
+}
+
 // Gathers the facts about one file. Reads at most a few megabytes, never runs anything.
 export async function examine(filePath, { size, mtime, signal } = {}) {
   const name = path.basename(filePath);
@@ -160,8 +215,21 @@ export async function examine(filePath, { size, mtime, signal } = {}) {
         facts.longBase64 = /[a-z0-9+/]{400,}={0,2}/i.test(body.toString("latin1"));
         facts.charCodes = (text.match(/chr\(|charcode|fromcharcode/g) ?? []).length;
         if (facts.kind === "lnk") facts.lnkRuns = /powershell|pwsh|cmd\.exe|mshta|wscript|cscript|rundll32|regsvr32|certutil|bitsadmin/.exec(text)?.[0] ?? null;
+        // decode hidden PowerShell (-EncodedCommand) and judge what it really does
+        const plain = squeeze(body);
+        const decoded = decodeEncodedCommand(plain);
+        if (decoded) {
+          facts.decoded = decoded.slice(0, 600);
+          mergeHits(facts.hits, indicatorHits(searchable(Buffer.from(decoded))));
+        }
+        facts.hosts = hostsIn(`${plain}\n${decoded ?? ""}`).slice(0, 30);
+      } else if (facts.kind === "pdf" || ((facts.kind === "zip" || facts.kind === "ole") && office)) {
+        facts.hosts = hostsIn(squeeze(body)).slice(0, 30);
       }
     }
+    // a zip that is not an Office file: look at what it carries, and read the small scripts inside
+    if (facts.kind === "zip" && !office) facts.archive = inspectArchive(filePath);
+    if (facts.archive?.hosts.length) facts.hosts = [...new Set([...(facts.hosts ?? []), ...facts.archive.hosts])].slice(0, 30);
   } catch (err) {
     facts.error = err.code ?? err.message;
   } finally {
@@ -235,6 +303,12 @@ export function judge(facts, { signer = null, autostart = null } = {}) {
     const hot = pe.sections.find((s) => s.exec && s.entropy > 7.3 && s.rawSize > 4096);
     if (hot && !pe.dotnet && !upx) add("packed-code", 2, "Its code section looks encrypted or compressed", `${hot.name || "(unnamed)"} entropy ${hot.entropy.toFixed(2)}`);
     if (!upx && pe.sections.some((s) => s.exec && s.write)) add("writable-code", 2, "Has code that can rewrite itself while running");
+    // Programs start in their code section; starting elsewhere is how packers and injected stubs work.
+    const e = pe.entrySection;
+    if (e && !pe.dotnet && !upx) {
+      if (!e.exec) add("entry-odd", 2, "Starts running from a part of the file not meant for code", e.name || "(unnamed)");
+      else if (e.last && pe.sections.length > 2 && e.entropy > 7) add("entry-last", 1, "Starts running from its last, compressed section", e.name || "(unnamed)");
+    }
     const imp = importSet(pe);
     const has = (...f) => f.some((x) => imp.has(x));
     if (has("virtualallocex") && has("writeprocessmemory") && has("createremotethread", "ntcreatethreadex", "rtlcreateuserthread", "queueuserapc", "setthreadcontext")) {
@@ -259,7 +333,18 @@ export function judge(facts, { signer = null, autostart = null } = {}) {
   if (scriptLike && h.hidden) add("hidden-window", 1, "Runs with its window hidden");
   if (scriptLike && facts.longBase64) add("encoded-payload", 2, "Carries a long encoded block of data");
   if (scriptLike && facts.charCodes >= 30) add("obfuscated", 2, "Builds its code from character codes to hide it");
-  if (facts.kind === "lnk" && facts.lnkRuns && (h.downloadExec || h.hidden || facts.longBase64)) add("shortcut-command", 4, `A shortcut that secretly runs ${facts.lnkRuns}`);
+  if (facts.kind === "lnk" && facts.lnkRuns && (h.downloadExec || h.hidden || facts.longBase64 || facts.decoded)) add("shortcut-command", 4, `A shortcut that secretly runs ${facts.lnkRuns}`);
+  if (facts.decoded) add("encoded-command", 3, "Hides a PowerShell command in encoded form", facts.decoded.replace(/\s+/g, " ").slice(0, 160));
+
+  // Archives: what a downloaded zip carries.
+  const a = facts.archive;
+  if (a) {
+    if (a.doubleExt.length) add("archive-double-extension", 5, "A zip hiding a program behind a document name", a.doubleExt[0], { evenIfSigned: true });
+    else if (a.risky.length) add("archive-executable", a.files <= 3 ? 3 : 2, a.risky.length === 1 ? "A zip carrying a program or script" : `A zip carrying ${a.risky.length} programs or scripts`, a.risky.slice(0, 3).join(", "));
+    if (a.encrypted && a.risky.length) add("archive-locked", 3, "A password-protected zip with a program inside, which hides it from scanners");
+    if (a.hits.downloadExec) add("archive-download-exec", 3, "A script inside the zip downloads and runs code");
+    if (a.hits.evasion) add("archive-evasion", 4, "A script inside the zip turns off security features");
+  }
 
   // Documents.
   if (facts.macro) {

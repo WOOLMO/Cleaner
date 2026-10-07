@@ -12,7 +12,7 @@ import { isSafeToRemove, removePermanently, freeBytes } from "./remove.js";
 import { holdItems, listHeld, restoreHeld, purgeHeld, HOLD_DIR } from "./hold.js";
 import { writeRemovalScript, desktopDir } from "./script.js";
 import { askKey, askLine, closeInput } from "./input.js";
-import { runProtect, runQuarantine } from "./cli-protect.js";
+import { runProtect, runQuarantine, runIntel, runYara } from "./cli-protect.js";
 import { analyzeFolder, rulePlan, aiPlan, applyPlan, undoOrganize, listJournals, organizeBlocked, LANGUAGE_NAMES } from "./organize.js";
 import {
   c, banner, logLine, Task, box, bar, rule, verdictTag, columns, detailRoom,
@@ -20,7 +20,7 @@ import {
 } from "./ui.js";
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
-const COMMANDS = ["scan", "map", "organize", "protect", "quarantine", "clean", "list", "export", "restore", "purge", "setup", "help"];
+const COMMANDS = ["scan", "map", "organize", "protect", "quarantine", "intel", "yara", "clean", "list", "export", "restore", "purge", "setup", "help"];
 const sum = (list) => list.reduce((total, e) => total + e.size, 0);
 const seconds = (ms) => `${(ms / 1000).toFixed(1)}s`;
 
@@ -73,6 +73,8 @@ function help() {
   line("cleaner organize --undo", "put the last organize run back");
   line("cleaner protect [full|folder]", "threat scan: startup entries, downloads, temp (default)");
   line("cleaner quarantine", "list, restore or delete quarantined files");
+  line("cleaner intel", "refresh the open threat-intel feeds now");
+  line("cleaner yara install|update", "add YARA and the YARA Forge rules");
   line("cleaner clean", "pick items from the last scan and remove them");
   line("cleaner list", "show the last scan");
   line("cleaner export", "write the removal script from the last scan");
@@ -686,6 +688,8 @@ export async function main(argv) {
     if (cmd === "map") await runMap(args, opts);
     else if (cmd === "protect") await runProtect(args, opts, { banner: () => banner(VERSION), applyPolicy, geminiSetup });
     else if (cmd === "quarantine") await runQuarantine(args, { banner: () => banner(VERSION) });
+    else if (cmd === "intel") await runIntel(args, { banner: () => banner(VERSION) });
+    else if (cmd === "yara") await runYara(args, { banner: () => banner(VERSION) });
     else if (cmd === "organize") await (opts.undo ? runOrganizeUndo() : runOrganize(args, opts));
     else if (cmd === "list") runList(opts);
     else if (cmd === "export") runExport(opts);

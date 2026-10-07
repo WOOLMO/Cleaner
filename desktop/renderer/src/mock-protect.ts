@@ -1,5 +1,5 @@
 // Sample data for the Protection page in demo mode. All made up; nothing here touches a disk.
-import type { CleanerApi, ProtectStatus, Quarantined, StartupEntry, ThreatEvent, ThreatResult, ThreatScan } from "./types";
+import type { Behavior, CleanerApi, IntelFeed, ProtectStatus, Quarantined, StartupEntry, ThreatEvent, ThreatResult, ThreatScan, WatchEvent } from "./types";
 
 const HOME = "C:\\Users\\alex";
 const MB = 1024 ** 2;
@@ -14,7 +14,7 @@ const results: ThreatResult[] = [
     id: 1, path: `${HOME}\\Downloads\\invoice_8841.pdf.exe`, name: "invoice_8841.pdf.exe", size: 1.4 * MB, mtime: now - 2 * 3600_000, kind: "pe", sha256: hash("invoice"),
     severity: "threat", score: 10,
     findings: [f("double-extension", 5, "Hides a program behind a document name", "invoice_8841.pdf.exe"), f("stealer", 3, "Refers to saved browser passwords and cookies"), f("from-internet", 1, "Downloaded from the internet", "https://mail-attachments.example.net/a/8841"), f("unsigned", 1, "Not digitally signed by its publisher")],
-    detections: [{ source: "malwarebazaar", name: "Known malware sample: AgentTesla" }],
+    detections: [{ source: "malwarebazaar", name: "Known malware sample: AgentTesla" }, { source: "yara", name: "MAL AgentTesla Mar23: Detects AgentTesla information stealer" }],
     signer: { status: "none", subject: null }, zone: { id: 3, url: "https://mail-attachments.example.net/a/8841" }, autostart: null, ai: null,
     reputation: [{ source: "malwarebazaar", found: true, label: "AgentTesla" }], trusted: false, status: "found",
   },
@@ -88,6 +88,26 @@ const startups: StartupEntry[] = [
   st(15, "winlogon", "Winlogon", "Shell", "explorer.exe", null),
 ];
 
+const live: Behavior = {
+  processes: [
+    {
+      pid: 7344, ppid: 5120, name: "svchost.exe", path: `${HOME}\\AppData\\Roaming\\SysHelper\\svchost.exe`, cmd: "svchost.exe -silent", parentName: "explorer.exe", started: new Date(now - 5 * 3600_000).toISOString(),
+      signer: { status: "none", subject: null }, severity: "threat", score: 11, external: 2, listening: [],
+      detections: [{ source: "feodo", name: "Connected to a known botnet server 203.0.113.42:443 (QakBot)" }],
+      findings: [f("masquerade", 6, "Uses the name of a Windows process (svchost.exe) from the wrong folder", `${HOME}\\AppData\\Roaming\\SysHelper\\svchost.exe`), f("phones-out", 2, "Talks to 2 internet addresses", "203.0.113.42, 198.51.100.7"), f("unsigned", 1, "Not digitally signed")],
+    },
+    {
+      pid: 9120, ppid: 8812, name: "powershell.exe", path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", cmd: "powershell.exe -nop -w hidden -enc UwB0AGEAcgB0AC0AUAByAG8AYwBlAHMAcwAgAC4ALgAuAA==", parentName: "WINWORD.EXE", started: new Date(now - 40 * 60_000).toISOString(),
+      signer: { status: "valid", subject: "Microsoft Windows" }, severity: "suspicious", score: 8, external: 0, listening: [], detections: [],
+      findings: [f("office-child", 5, "WINWORD.EXE started powershell.exe, a common macro-malware move"), f("encoded-command", 3, "Runs a hidden, encoded PowerShell command", "Start-Process 'C:\\Users\\Public\\upd.exe' -WindowStyle Hidden")],
+    },
+  ],
+  drivers: [{ name: "AsIO2", display: "ASUS IO driver", path: "C:\\Windows\\System32\\drivers\\AsIO2.sys", sha256: null, severity: "suspicious", label: "A driver known to be abused to switch off security software (LOLDrivers: AsIO2.sys)" }],
+  stats: { processes: 287, external: 41, listening: 52, drivers: 196, talkers: 13 },
+};
+const feed = (label: string, count: number): IntelFeed => ({ label, count, updated: new Date(now - 2 * 3600_000).toISOString(), stale: false });
+const intel = { malwareBazaar: feed("MalwareBazaar recent samples", 1310), urlhaus: feed("URLhaus malware hosts", 401), feodo: feed("Feodo Tracker botnet servers", 5), lolDrivers: feed("LOLDrivers", 2302) };
+
 const makeScan = (finishedAt: number): ThreatScan => ({
   mode: "quick",
   roots: [`${HOME}\\Downloads`, `${HOME}\\Desktop`, `${HOME}\\AppData\\Local\\Temp`, `${HOME}\\AppData\\Roaming`],
@@ -95,9 +115,10 @@ const makeScan = (finishedAt: number): ThreatScan => ({
   durationMs: 61_000,
   finishedAt,
   stats: { filesSeen: 8_405, inspected: 2_840, programs: 489, signed: 603, startups: startups.length, threats: 2, suspicious: 3, notices: 2 },
-  engines: { rules: true, hashList: true, defender: true, malwareBazaar: true, virusTotal: false, gemini: true, defenderReason: null, model: "gemini-3.5-flash-lite", aiError: null },
+  engines: { rules: true, hashList: true, defender: true, malwareBazaar: true, virusTotal: false, gemini: true, defenderReason: null, model: "gemini-3.5-flash-lite", aiError: null, intel, yara: { rules: 3412, release: "20261004" }, hashlookup: true, behavior: true },
   results: results.map((r) => ({ ...r })),
   startups,
+  behavior: live,
   errors: [],
 });
 
@@ -107,16 +128,25 @@ let status: ProtectStatus = {
   keys: { malwareBazaar: { hasKey: true, source: "secure", hint: "4f2a…9c1e" }, virusTotal: { hasKey: false, source: null, hint: null } },
   knownHashes: 1,
   quarantined: 1,
+  intel,
+  yara: { ready: true, engine: { version: "v4.5.5", installed: new Date(now - 3 * 86_400_000).toISOString() }, rules: { release: "20261004", installed: new Date(now - 3 * 86_400_000).toISOString(), count: 3412 } },
+  online: true,
+  watching: true,
 };
+let watch: WatchEvent[] = [
+  { id: 2, time: new Date(now - 25 * 60_000).toISOString(), kind: "file", path: `${HOME}\\Downloads\\Payment_Details.zip`, name: "Payment_Details.zip", severity: "suspicious", reason: "A zip hiding a program behind a document name", sha256: hash("payzip"), size: 412_000, status: "found" },
+  { id: 1, time: new Date(now - 26 * 3600_000).toISOString(), kind: "startup", path: `${HOME}\\AppData\\Roaming\\SysHelper\\svchost.exe`, name: "SysHelper", severity: "suspicious", reason: "Starts with Windows from a folder any program can write to", sha256: null, size: 0, status: "found" },
+];
 let quarantine: Quarantined[] = [
   { id: "2026-10-05T19-02-11-412Z-a1b2c3", original: `${HOME}\\Downloads\\free-robux-generator.exe`, size: 3.2 * MB, sha256: hash("robux"), reason: "Known malware sample: RedLine Stealer", severity: "threat", time: new Date(now - 2 * DAY).toISOString() },
 ];
 const listeners = new Set<(e: ThreatEvent) => void>();
+const setupListeners = new Set<(e: { step: string }) => void>();
 let cancelled = false;
 
 export const protectMock: Pick<
   CleanerApi,
-  "protectStatus" | "lastThreatScan" | "startThreatScan" | "cancelThreatScan" | "onThreatEvent" | "quarantineItems" | "trustItem" | "lookupItem" | "listQuarantine" | "restoreQuarantine" | "deleteQuarantine" | "setServiceKey" | "clearServiceKey"
+  "protectStatus" | "lastThreatScan" | "startThreatScan" | "cancelThreatScan" | "onThreatEvent" | "quarantineItems" | "trustItem" | "lookupItem" | "listQuarantine" | "restoreQuarantine" | "deleteQuarantine" | "setServiceKey" | "clearServiceKey" | "updateIntel" | "setupYara" | "onSetupEvent" | "endProcess" | "watchEvents" | "onWatchEvent" | "watchQuarantine" | "watchDismiss"
 > = {
   async protectStatus() {
     return { ...status, quarantined: quarantine.length };
@@ -127,6 +157,8 @@ export const protectMock: Pick<
   async startThreatScan() {
     cancelled = false;
     const emit = (e: ThreatEvent) => listeners.forEach((fn) => fn(e));
+    emit({ type: "phase", phase: "intel" });
+    await wait(400);
     emit({ type: "phase", phase: "autostart" });
     await wait(500);
     emit({ type: "autostart", count: startups.length });
@@ -152,8 +184,12 @@ export const protectMock: Pick<
     }
     emit({ type: "phase", phase: "reputation" });
     await wait(500);
+    emit({ type: "phase", phase: "yara" });
+    await wait(500);
     emit({ type: "phase", phase: "ai" });
     await wait(600);
+    emit({ type: "phase", phase: "behavior" });
+    await wait(500);
     scan = makeScan(Date.now());
     return { ok: true, scan };
   },
@@ -204,6 +240,43 @@ export const protectMock: Pick<
   async setServiceKey({ name }) {
     status = { ...status, keys: { ...status.keys, [name]: { hasKey: true, source: "secure", hint: "demo…key0" } } };
     return { ok: true, status };
+  },
+  async updateIntel() {
+    for (const step of ["MalwareBazaar recent samples", "URLhaus malware hosts", "Feodo Tracker botnet servers", "LOLDrivers"]) {
+      setupListeners.forEach((fn) => fn({ step }));
+      await wait(250);
+    }
+    return { report: { malwareBazaar: { ok: true, count: 1310 } }, status };
+  },
+  async setupYara() {
+    for (const step of ["engine", "rules", "compile"]) {
+      setupListeners.forEach((fn) => fn({ step }));
+      await wait(400);
+    }
+    return status;
+  },
+  onSetupEvent(fn) {
+    setupListeners.add(fn);
+    return () => setupListeners.delete(fn);
+  },
+  async endProcess(pid) {
+    if (!scan?.behavior) throw new Error("no snapshot");
+    scan = { ...scan, behavior: { ...scan.behavior, processes: scan.behavior.processes.map((p) => (p.pid === pid ? { ...p, ended: true } : p)) } };
+    return { ok: true, scan };
+  },
+  async watchEvents() {
+    return watch;
+  },
+  onWatchEvent() {
+    return () => {};
+  },
+  async watchQuarantine(id) {
+    watch = watch.map((e) => (e.id === id ? { ...e, status: "quarantined" } : e));
+    return watch;
+  },
+  async watchDismiss(id) {
+    watch = watch.map((e) => (e.id === id ? { ...e, status: "dismissed" } : e));
+    return watch;
   },
   async clearServiceKey(name) {
     status = { ...status, keys: { ...status.keys, [name]: { hasKey: false, source: null, hint: null } } };

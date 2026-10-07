@@ -6,6 +6,7 @@ import * as engine from "./engine.js";
 import { effectiveSettings, writeSettings } from "./settings.js";
 import { getKey, saveKey, clearKey, keyStatus } from "./secrets.js";
 import { log } from "./log.js";
+import { startWatch, stopWatch, watchEvents, watching, markEvent } from "./watch.js";
 
 const LAST_SCAN = path.join(engine.DATA_DIR, "last-scan.json");
 const LAST_MAP = path.join(engine.DATA_DIR, "last-map.json");
@@ -162,8 +163,9 @@ export function registerIpc() {
   const settingsView = () => ({ ...effectiveSettings(), key: keyStatus() });
   handle("settings:get", () => settingsView());
   handle("settings:set", (event, patch) => {
-    const { changed } = writeSettings(patch);
+    const { changed, next } = writeSettings(patch);
     if (changed.length) engine.audit("settings", { app: "desktop", changed });
+    if (changed.includes("watch")) (next.watch ? startWatch() : stopWatch());
     return settingsView();
   });
   handle("key:set", async (event, key) => {
@@ -552,6 +554,10 @@ export function registerIpc() {
       keys: { malwareBazaar: keyStatus("malwareBazaar"), virusTotal: keyStatus("virusTotal") },
       knownHashes: engine.loadBlocklist(policy.blocklistFile ? [policy.blocklistFile] : []).size,
       quarantined: engine.listQuarantine().length,
+      intel: engine.intelStatus(),
+      yara: engine.yaraStatus(),
+      online: effectiveSettings().settings.aiEnabled,
+      watching: watching(),
     };
   };
   handle("protect:status", () => protectStatus());
@@ -582,6 +588,7 @@ export function registerIpc() {
         ai: settings.aiEnabled && gemini ? { apiKey: gemini, models: engine.DEFAULTS.models } : null,
         keys: online ? { malwareBazaar: getKey("malwareBazaar").key, virusTotal: getKey("virusTotal").key } : {},
         blocklists: policy.blocklistFile ? [policy.blocklistFile] : [],
+        online,
         signal: controller.signal,
         onEvent: emit,
       });
@@ -644,6 +651,58 @@ export function registerIpc() {
     r.reputation = [...(r.reputation ?? []).filter((x) => x.source !== "virustotal"), result];
     engine.saveThreatScan(lastThreat);
     return { opened: false, result, scan: lastThreat };
+  });
+
+  // Threat intel and YARA set-up, with progress for the window.
+  let setupJob = null;
+  handle("protect:intelUpdate", async (event) => {
+    if (!effectiveSettings().settings.aiEnabled) fail("online checks are turned off in Settings");
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const report = await engine.updateIntel({ force: true, onProgress: (p) => !win.isDestroyed() && win.webContents.send("protect:setupEvent", { step: p.label }) });
+    engine.audit("settings", { app: "desktop", changed: ["threat intel updated"] });
+    return { report, status: await protectStatus() };
+  });
+  handle("protect:yara", async (event, action) => {
+    if (setupJob) fail("YARA is already being set up");
+    if (action !== "install" && action !== "update") fail("unknown action");
+    if (!effectiveSettings().settings.aiEnabled) fail("online checks are turned off in Settings");
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const step = (s) => !win.isDestroyed() && win.webContents.send("protect:setupEvent", { step: s });
+    setupJob = true;
+    try {
+      if (action === "install") await engine.installYara({ onProgress: step });
+      else await engine.updateYaraRules({ onProgress: step });
+      engine.audit("settings", { app: "desktop", changed: [action === "install" ? "YARA installed" : "YARA rules updated"] });
+      return protectStatus();
+    } finally {
+      setupJob = null;
+    }
+  });
+  // Only a process the last snapshot flagged can be ended, by its pid, after the user confirmed in the window.
+  handle("protect:endProcess", (event, pid) => {
+    const p = lastThreat?.behavior?.processes.find((x) => x.pid === pid);
+    if (!Number.isInteger(pid) || !p) fail("that process is not in the last scan");
+    try {
+      process.kill(pid);
+    } catch (err) {
+      if (err.code === "ESRCH") return { ok: true, gone: true };
+      fail(err.code === "EPERM" ? "Windows refused: the process needs admin rights to end" : err.message);
+    }
+    p.ended = true;
+    engine.saveThreatScan(lastThreat);
+    engine.audit("end-process", { app: "desktop", items: [{ path: p.path ?? p.name, size: 0, result: `pid ${pid}` }] });
+    return { ok: true, scan: lastThreat };
+  });
+
+  // Watch mode findings: quarantined or dismissed by their id, never by a path from the window.
+  handle("protect:watchEvents", () => watchEvents());
+  handle("protect:watchDismiss", (event, id) => markEvent(id, "dismissed"));
+  handle("protect:watchQuarantine", (event, id) => {
+    const e = watchEvents().find((x) => x.id === id && x.status === "found" && x.kind === "file");
+    if (!e) fail("that file is not in the watch list");
+    engine.quarantineFile(e.path, { reason: e.reason, sha256: e.sha256, severity: e.severity });
+    engine.audit("quarantine", { app: "desktop", items: [{ path: e.path, size: e.size ?? 0, result: e.severity }] });
+    return markEvent(id, "quarantined");
   });
 
   handle("quarantine:list", () => engine.listQuarantine());

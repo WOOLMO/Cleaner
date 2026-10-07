@@ -3,13 +3,13 @@ import { api } from "./api";
 import { formatSize, setHome } from "./format";
 import type {
   AppInfo, AuditEntry, Drive, FolderNetwork, GraphNode, Held, MapResult, OrganizePlace, OrganizePlan, OrganizeRun, ProtectStatus, Quarantined, ScanEvent, ScanResult,
-  ServiceName, SettingsView, ThreatEvent, ThreatScan,
+  ServiceName, SettingsView, ThreatEvent, ThreatScan, WatchEvent,
 } from "./types";
 
 export type Page = "overview" | "scan" | "protect" | "organize" | "map" | "graph" | "holding" | "activity" | "settings";
 
 export interface ThreatProgress {
-  phase: "autostart" | "walk" | "inspect" | "signatures" | "defender" | "reputation" | "ai";
+  phase: "intel" | "autostart" | "walk" | "inspect" | "signatures" | "defender" | "yara" | "reputation" | "ai" | "behavior";
   done: Set<string>;
   startups: number;
   files: number;
@@ -90,7 +90,9 @@ export interface State {
     progress: ThreatProgress | null;
     quarantine: Quarantined[];
     focus: number | null; // a result opened in the drawer (also used by screenshot mode)
-    tab: "findings" | "startup" | "quarantine";
+    tab: "findings" | "live" | "startup" | "quarantine";
+    setup: string | null; // a feed update or a YARA install in progress
+    watch: WatchEvent[];
   };
 }
 
@@ -115,7 +117,7 @@ let state: State = {
   palette: false,
   org: { places: [], root: null, plan: null, planning: false, applying: false, run: null, history: [] },
   graph: { root: null, tree: null, loading: false, expanding: null, mode: "graph", network: null, building: null },
-  protect: { status: null, scan: null, running: false, progress: null, quarantine: [], focus: null, tab: "findings" },
+  protect: { status: null, scan: null, running: false, progress: null, quarantine: [], focus: null, tab: "findings", setup: null, watch: [] },
 };
 
 const listeners = new Set<() => void>();
@@ -376,8 +378,8 @@ export function collapseGraph(path: string) {
 export const setProtect = (patch: Partial<State["protect"]>) => store.set((s) => ({ protect: { ...s.protect, ...patch } }));
 
 export async function loadProtect() {
-  const [status, scan, quarantine] = await Promise.all([api.protectStatus(), api.lastThreatScan(), api.listQuarantine()]);
-  setProtect({ status, scan, quarantine });
+  const [status, scan, quarantine, watch] = await Promise.all([api.protectStatus(), api.lastThreatScan(), api.listQuarantine(), api.watchEvents()]);
+  setProtect({ status, scan, quarantine, watch });
 }
 
 function applyThreatEvent(p: ThreatProgress, ev: ThreatEvent): ThreatProgress {
@@ -401,7 +403,7 @@ function applyThreatEvent(p: ThreatProgress, ev: ThreatEvent): ThreatProgress {
 
 export async function startThreatScan(mode: ThreatScan["mode"], roots: string[] = []) {
   if (store.get().protect.running) return;
-  const progress: ThreatProgress = { phase: "autostart", done: new Set(), startups: 0, files: 0, candidates: 0, inspected: 0, total: 0, signatures: 0, step: null, current: "", startedAt: Date.now() };
+  const progress: ThreatProgress = { phase: "intel", done: new Set(), startups: 0, files: 0, candidates: 0, inspected: 0, total: 0, signatures: 0, step: null, current: "", startedAt: Date.now() };
   setProtect({ running: true, progress, focus: null, tab: "findings" });
   store.set({ page: "protect" });
   const off = api.onThreatEvent((ev) => store.set((s) => ({ protect: { ...s.protect, progress: s.protect.progress ? applyThreatEvent(s.protect.progress, ev) : null } })));
@@ -477,6 +479,70 @@ export async function deleteQuarantine(id: string) {
   } finally {
     refreshActivity();
   }
+}
+
+export async function updateIntel() {
+  setProtect({ setup: "Updating threat intel" });
+  const off = api.onSetupEvent((e) => setProtect({ setup: e.step }));
+  try {
+    const r = await api.updateIntel();
+    setProtect({ status: r.status });
+    const failed = Object.entries(r.report).filter(([, x]) => !x.ok);
+    if (failed.length) toast("warn", "Some feeds could not be updated", failed.map(([k, x]) => `${k}: ${x.error}`).join("; "));
+    else toast("ok", "Threat intel updated", "Public lists only; nothing about this PC was sent.");
+  } catch (err) {
+    toast("error", "Could not update threat intel", message(err));
+  } finally {
+    off();
+    setProtect({ setup: null });
+  }
+}
+
+export async function setupYara(action: "install" | "update") {
+  setProtect({ setup: action === "install" ? "Installing YARA" : "Updating YARA rules" });
+  const off = api.onSetupEvent((e) => setProtect({ setup: e.step === "engine" ? "Downloading the YARA engine" : e.step === "rules" ? "Downloading YARA Forge rules" : e.step === "compile" ? "Compiling the rules" : e.step }));
+  try {
+    const status = await api.setupYara(action);
+    setProtect({ status });
+    toast("ok", action === "install" ? "YARA installed" : "YARA rules updated", `${status.yara?.rules?.count?.toLocaleString() ?? ""} rules from YARA Forge, verified against GitHub's checksums.`);
+  } catch (err) {
+    toast("error", action === "install" ? "YARA was not installed" : "The rules were not updated", message(err));
+  } finally {
+    off();
+    setProtect({ setup: null });
+  }
+}
+
+export async function endProcess(pid: number) {
+  try {
+    const r = await api.endProcess(pid);
+    if (r.scan) setProtect({ scan: r.scan });
+    toast("ok", r.gone ? "That program had already closed" : "Program ended", "Quarantine its file so it cannot start again.");
+  } catch (err) {
+    toast("error", "Could not end the program", message(err));
+  } finally {
+    refreshActivity();
+  }
+}
+
+// Watch mode alerts arrive while the app is open, on any page.
+api.onWatchEvent((e) => {
+  store.set((s) => ({ protect: { ...s.protect, watch: [e, ...s.protect.watch.filter((x) => x.id !== e.id)].slice(0, 60) } }));
+  toast(e.severity === "threat" ? "error" : "warn", e.kind === "startup" ? "New program set to start with Windows" : "Watch mode found something", `${e.name}: ${e.reason}`);
+});
+
+export async function watchQuarantine(id: number) {
+  try {
+    setProtect({ watch: await api.watchQuarantine(id), quarantine: await api.listQuarantine() });
+    toast("ok", "File quarantined", "It can't run now. Restore it any time from the Quarantine tab.");
+  } catch (err) {
+    toast("error", "Not quarantined", message(err));
+  } finally {
+    refreshActivity();
+  }
+}
+export async function watchDismiss(id: number) {
+  setProtect({ watch: await api.watchDismiss(id) });
 }
 
 export async function setServiceKey(name: ServiceName, key: string) {

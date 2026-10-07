@@ -131,7 +131,7 @@ function makeMap(): MapResult {
 let map: MapResult | null = { ...makeMap(), explained, explainedBy: "gemini-3.5-flash-lite" };
 
 let settings: SettingsView = {
-  settings: { theme: "system", aiEnabled: true, previews: true, maxAi: 400, largeMB: 200, exclude: [`${HOME}\\Documents\\Taxes`], targets: [HOME] },
+  settings: { theme: "system", aiEnabled: true, previews: true, maxAi: 400, largeMB: 200, exclude: [`${HOME}\\Documents\\Taxes`], targets: [HOME], watch: true },
   locks: {},
   policy: { managed: false, organization: null, excludePaths: [], error: null, source: "C:\\ProgramData\\Cleaner\\policy.json" },
   allowPermanentDelete: true,
@@ -160,7 +160,7 @@ const SAMPLE_PATHS = [
 
 export const mockApi: CleanerApi = {
   async info(): Promise<AppInfo> {
-    return { version: "1.2.1", engineVersion: "1.2.1", electron: "44.6.0", dataDir: `${HOME}\\AppData\\Local\\cleaner`, auditFile: `${HOME}\\AppData\\Local\\cleaner\\audit.jsonl`, policyFile: "C:\\ProgramData\\Cleaner\\policy.json", logFile: `${HOME}\\AppData\\Local\\cleaner\\logs\\desktop.log`, user: "alex", machine: "ALEX-PC", home: HOME };
+    return { version: "1.3.0", engineVersion: "1.3.0", electron: "44.6.0", dataDir: `${HOME}\\AppData\\Local\\cleaner`, auditFile: `${HOME}\\AppData\\Local\\cleaner\\audit.jsonl`, policyFile: "C:\\ProgramData\\Cleaner\\policy.json", logFile: `${HOME}\\AppData\\Local\\cleaner\\logs\\desktop.log`, user: "alex", machine: "ALEX-PC", home: HOME };
   },
   async drives(): Promise<Drive[]> {
     return [

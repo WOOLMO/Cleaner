@@ -145,6 +145,7 @@ export interface Settings {
   largeMB: number;
   exclude: string[];
   targets: string[];
+  watch: boolean;
 }
 
 export interface SettingsView {
@@ -262,6 +263,53 @@ export interface GraphNode {
 }
 
 export type Severity = "threat" | "suspicious" | "notice";
+export type DetectionSource = "hash" | "defender" | "malwarebazaar" | "virustotal" | "malwarebazaar-feed" | "urlhaus" | "loldrivers" | "yara" | "hashlookup" | "feodo";
+
+export interface IntelFeed {
+  label: string;
+  updated: string | null;
+  count: number;
+  stale: boolean;
+}
+
+export interface YaraStatus {
+  ready: boolean;
+  engine: { version: string; installed: string } | null;
+  rules: { release: string; installed: string; count: number } | null;
+}
+
+export interface LiveProcess {
+  pid: number;
+  ppid: number;
+  name: string;
+  path: string | null;
+  cmd: string | null;
+  parentName: string | null;
+  started: string | null;
+  signer: Signer | null;
+  findings: ThreatFinding[];
+  detections: { source: DetectionSource; name: string }[];
+  score: number;
+  severity: Severity | "clean";
+  external: number;
+  listening: number[];
+  ended?: boolean;
+}
+
+export interface LiveDriver {
+  name: string;
+  display?: string | null;
+  path: string;
+  sha256: string | null;
+  severity: Severity | "clean";
+  label: string | null;
+}
+
+export interface Behavior {
+  processes: LiveProcess[];
+  drivers: LiveDriver[];
+  stats: { processes: number; external: number; listening: number; drivers: number; talkers: number };
+}
 
 export interface KeyStatus {
   hasKey: boolean;
@@ -284,7 +332,7 @@ export interface Signer {
 }
 
 export interface Reputation {
-  source: "malwarebazaar" | "virustotal";
+  source: "malwarebazaar" | "virustotal" | "hashlookup";
   found: boolean;
   label?: string | null;
   malicious?: number;
@@ -321,7 +369,7 @@ export interface ThreatResult {
   severity: Severity;
   score: number;
   findings: ThreatFinding[];
-  detections: { source: "hash" | "defender" | "malwarebazaar" | "virustotal"; name: string }[];
+  detections: { source: DetectionSource; name: string }[];
   signer: Signer | null;
   zone: { id: number; url: string | null } | null;
   autostart: StartupRef | null;
@@ -337,7 +385,7 @@ export interface ThreatScan {
   startedAt: number;
   durationMs: number;
   finishedAt: number;
-  stats: { filesSeen: number; inspected: number; programs: number; signed: number; startups: number; threats: number; suspicious: number; notices: number };
+  stats: { filesSeen: number; inspected: number; programs: number; signed: number; startups: number; threats: number; suspicious: number; notices: number; cloudOnly?: number; liveFlags?: number };
   engines: {
     rules: boolean;
     hashList: boolean;
@@ -348,9 +396,14 @@ export interface ThreatScan {
     defenderReason: string | null;
     model: string | null;
     aiError: string | null;
+    intel?: Record<string, IntelFeed> | null;
+    yara?: { rules: number | null; release: string | null } | null;
+    hashlookup?: boolean;
+    behavior?: boolean;
   };
   results: ThreatResult[];
   startups: StartupEntry[];
+  behavior?: Behavior | null;
   errors: string[];
 }
 
@@ -359,6 +412,23 @@ export interface ProtectStatus {
   keys: { malwareBazaar: KeyStatus; virusTotal: KeyStatus };
   knownHashes: number;
   quarantined: number;
+  intel?: Record<string, IntelFeed>;
+  yara?: YaraStatus;
+  online?: boolean;
+  watching?: boolean;
+}
+
+export interface WatchEvent {
+  id: number;
+  time: string;
+  kind: "file" | "startup";
+  path: string;
+  name: string;
+  severity: Severity | "clean";
+  reason: string;
+  sha256: string | null;
+  size: number;
+  status: "found" | "quarantined" | "dismissed";
 }
 
 export interface Quarantined {
@@ -372,13 +442,13 @@ export interface Quarantined {
 }
 
 export type ThreatEvent =
-  | { type: "phase"; phase: "autostart" | "walk" | "inspect" | "signatures" | "defender" | "reputation" | "ai" }
+  | { type: "phase"; phase: "intel" | "autostart" | "walk" | "inspect" | "signatures" | "defender" | "yara" | "reputation" | "ai" | "behavior" }
   | { type: "autostart"; count: number }
   | { type: "walk"; files: number; candidates: number; current: string }
   | { type: "walked"; files: number; candidates: number }
   | { type: "inspect"; done: number; total: number; current: string }
   | { type: "signatures"; checked: number }
-  | { type: "defender" | "reputation" | "ai"; done: number; total: number };
+  | { type: "defender" | "reputation" | "ai" | "yara"; done: number; total: number };
 
 export type ServiceName = "malwareBazaar" | "virusTotal";
 
@@ -455,6 +525,14 @@ export interface CleanerApi {
   deleteQuarantine(id: string): Promise<Quarantined[]>;
   setServiceKey(request: { name: ServiceName; key: string }): Promise<{ ok: true; status: ProtectStatus } | { ok: false; message: string }>;
   clearServiceKey(name: ServiceName): Promise<ProtectStatus>;
+  updateIntel(): Promise<{ report: Record<string, { ok: boolean; count?: number; error?: string }>; status: ProtectStatus }>;
+  setupYara(action: "install" | "update"): Promise<ProtectStatus>;
+  onSetupEvent(fn: (e: { step: string }) => void): () => void;
+  endProcess(pid: number): Promise<{ ok: true; gone?: boolean; scan?: ThreatScan }>;
+  watchEvents(): Promise<WatchEvent[]>;
+  onWatchEvent(fn: (e: WatchEvent) => void): () => void;
+  watchQuarantine(id: number): Promise<WatchEvent[]>;
+  watchDismiss(id: number): Promise<WatchEvent[]>;
 }
 
 export interface WindowApi {

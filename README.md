@@ -25,6 +25,7 @@ Cleaner comes as a **desktop app** and a **command line tool**. Both run the sam
 - **Gemini double-checks every candidate** on the free tier. It can veto a deletion, but it can never approve one on its own.
 - **Organizes your folders in your own style.** It reads the folders you already made, their language and their casing, and files loose things the same way. No style yet? It uses plain folders in your Windows language.
 - **Draws your folders as a living graph.** Folders spring open when you click them, links carry a flow from each folder to what it holds, and anything your last scan flagged lights up.
+- **Scans for malware as a second opinion** next to your antivirus: open threat intel, YARA, signatures, behavior analysis and a watch mode, with every finding explained.
 - **Maps your whole drive** and explains the biggest folders: what they are and the safe way to win the space back.
 - **You decide, and you can undo.** Nothing is deleted or moved without your say. Held items and organize runs can be put back.
 
@@ -49,13 +50,13 @@ Cleaner comes as a **desktop app** and a **command line tool**. Both run the sam
 
 ## Desktop app
 
-Download `Cleaner-Setup-1.1.0.exe` (installer) or `Cleaner-1.1.0-win-x64.zip` (no install: unzip anywhere outside AppData and run `Cleaner.exe`) from [Releases](https://github.com/WOOLMO/Cleaner/releases), or build them yourself:
+Download `Cleaner-Setup-1.3.0.exe` (installer) or `Cleaner-1.3.0-win-x64.zip` (no install: unzip anywhere outside AppData and run `Cleaner.exe`) from [Releases](https://github.com/WOOLMO/Cleaner/releases), or build them yourself:
 
 ```powershell
 git clone https://github.com/WOOLMO/Cleaner
 cd Cleaner\desktop
 npm install
-npm run dist        # release\Cleaner-Setup-1.1.0.exe and the zip
+npm run dist        # release\1.3.0\Cleaner-Setup-1.3.0.exe and the zip
 ```
 
 The builds are not code-signed yet, so Windows SmartScreen may ask you to confirm the first launch.
@@ -64,14 +65,15 @@ The builds are not code-signed yet, so Windows SmartScreen may ask you to confir
 |---|---|
 | **Overview** | Drive gauge, what is ready to reclaim, the biggest folders and recent activity |
 | **Scan** | Pick folders, watch the scan phase by phase, then review findings in a fast table with filters and a detail drawer |
+| **Protection** | Threat scans, what is running right now, everything that starts with Windows, watch mode and the quarantine |
 | **Organize** | Tidy the loose files of your Desktop, Downloads or any folder you own, then undo with one click |
 | **Space map** | A treemap of the drive; click any block to look inside |
-| **Folder graph** | A living map of how folders and files connect |
+| **Folder graph** | A living map of how folders and files connect, and the full network of every folder at once |
 | **Holding area** | Items moved aside instead of deleted; restore or purge them |
 | **Activity** | Every scan, hold, delete, restore and organize run, from the app and the command line, exportable to CSV |
 | **Settings** | Gemini key, privacy switches, folders to never scan, theme, and your organization's policy |
 
-`Ctrl+K` opens a command palette with every page and action. `Ctrl+1` to `Ctrl+8` jump between pages.
+`Ctrl+K` opens a command palette with every page and action. `Ctrl+1` to `Ctrl+9` jump between pages.
 
 ## Organize
 
@@ -100,6 +102,41 @@ A force-directed map of a folder: its subfolders and biggest files, coloured by 
   <img src="docs/desktop-graph-rings.png" alt="Folder graph in the rings layout: each depth on its own ring around the user folder" width="780">
 </p>
 
+**Full network** maps every folder of a drive or your user folder at once, in the same living web: the biggest 2,500 folders unfold outward from the root, each top-level branch in its own color, with the rest folded into "+N folders" nodes. It reuses the space map's walk, so a place you already mapped opens instantly.
+
+<p align="center">
+  <img src="docs/desktop-network.png" alt="Full network: every folder of a drive as one web, each top-level branch in its own color" width="780">
+</p>
+
+## Protection
+
+A second opinion you run when you want, next to the antivirus that protects you in real time. It is not an antivirus replacement: blocking malware as it runs needs a kernel driver signed by Microsoft. What it does instead is look hard, explain everything, and never move a file without asking.
+
+| Engine | What it checks |
+|---|---|
+| **Cleaner rules** | Reads Windows programs (imports, sections, entry point, packers, signatures), scripts, shortcuts, zips, Office macros and PDFs. Flags disguised and double extensions, process injection and keylogger imports, hidden encoded PowerShell (decoded and read), downloaders, stealer and ransom-note patterns. |
+| **Open threat intel** | Feeds cached on your PC and refreshed daily: MalwareBazaar recent samples, URLhaus malware sites, Feodo Tracker botnet servers (abuse.ch), and LOLDrivers' list of malicious and abusable drivers. |
+| **YARA** | VirusTotal's YARA engine with the YARA Forge core rules, installed from the app. Every download must match the checksum GitHub publishes for it. |
+| **Microsoft Defender** | Its engine scans the risky files whenever Defender is your active antivirus. |
+| **Hash lookups** | CIRCL hashlookup (known-good and known-bad files, no key), and MalwareBazaar and VirusTotal with free keys. Only SHA-256 fingerprints are sent. |
+| **Behavior analysis** | What is running right now: fake system processes, Office starting PowerShell, encoded commands, programs running from temp folders, connections to known botnet servers, and loaded drivers checked against LOLDrivers. |
+| **Startup audit** | Run keys, Startup folders, scheduled tasks, services, Winlogon, debugger hijacks and WMI consumers. |
+| **Gemini** | An optional second opinion on flagged files, from names and findings only. |
+| **Watch mode** | While Cleaner is open, new files in Downloads, Desktop and Startup are checked the moment they land, and new startup entries every ten minutes, with a Windows notification. |
+
+Only hard evidence makes a file a **threat**: a known-bad hash, an antivirus engine, a strong YARA rule, a malware-site download or a botnet connection. The rules and Gemini can only make it **suspicious**, always with plain-language reasons. Online-only OneDrive files are never opened, so a scan never downloads them. Quarantine scrambles a file so it can't run, and restores it exactly.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/desktop-protect.png" alt="Protection: the scan result, the engines and watch mode"></td>
+    <td width="50%"><img src="docs/desktop-protect-live.png" alt="Running now: flagged programs with their reasons, and abusable drivers"></td>
+  </tr>
+  <tr>
+    <td><b>Protection.</b> The last scan, every engine, and watch mode alerts.</td>
+    <td><b>Running now.</b> A botnet connection, Office starting hidden PowerShell (decoded), and an abusable driver.</td>
+  </tr>
+</table>
+
 ## Command line
 
 ```powershell
@@ -109,6 +146,7 @@ cleaner scan                   # hunt junk in your user folder
 cleaner scan D:\Downloads      # or in any folder
 cleaner map                    # the biggest folders on C:, explained
 cleaner organize               # tidy your Desktop, your way
+cleaner protect                # threat scan: startup, downloads, temp, running programs
 cleaner clean                  # pick items from the last scan by number
 ```
 
@@ -129,6 +167,10 @@ When a scan finishes, cleaner asks one question:
 | `cleaner map [folder]` | Size the whole drive and explain the biggest folders (default: `C:\`) |
 | `cleaner organize [folder]` | Tidy loose files into folders in your style (default: your Desktop) |
 | `cleaner organize --undo` | Put the last organize run back |
+| `cleaner protect [full\|folder]` | Threat scan, then choose what to quarantine (default: a quick scan) |
+| `cleaner quarantine` | List quarantined files; `restore <n>` or `delete <n>` |
+| `cleaner intel` | Refresh the open threat-intel feeds now |
+| `cleaner yara install\|update` | Add YARA and the YARA Forge rules, or refresh the rules |
 | `cleaner clean` | Pick items from the last scan: all safe ones, everything, or by number |
 | `cleaner list` | Show the last scan |
 | `cleaner export` | Write the removal script from the last scan |
@@ -193,7 +235,7 @@ Results go to a tab-separated database, `%LOCALAPPDATA%\cleaner\cleaner-db.txt`,
 
 ## Privacy
 
-With Gemini on, a scan sends file paths, sizes, dates, detected file types and short masked previews of small text files. The space map sends only folder names and sizes. The organizer sends file names, sizes and dates, and the names of your folders. The folder graph sends nothing. On the free tier, Google may use that data to improve its products. Turn previews off, or Gemini off entirely, in Settings or with `--no-content` and `--offline`.
+With Gemini on, a scan sends file paths, sizes, dates, detected file types and short masked previews of small text files. The space map sends only folder names and sizes. The organizer sends file names, sizes and dates, and the names of your folders. The folder graph sends nothing. The threat scan downloads public threat-intel lists (nothing about your PC is sent) and sends only SHA-256 fingerprints of flagged files to CIRCL hashlookup, and to MalwareBazaar and VirusTotal if you add keys. Turning Gemini off in Settings keeps the threat scan fully offline too. On the free tier, Google may use that data to improve its products. Turn previews off, or Gemini off entirely, in Settings or with `--no-content` and `--offline`.
 
 ## Development
 

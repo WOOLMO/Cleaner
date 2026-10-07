@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { runThreatScan, saveThreatScan } from "./protect.js";
 import { loadBlocklist } from "./reputation.js";
+import { intelStatus, updateIntel } from "./intel.js";
+import { yaraStatus, installYara, updateYaraRules } from "./yara.js";
 import { quarantineFile, listQuarantine, restoreQuarantined, deleteQuarantined } from "./quarantine.js";
 import { audit } from "./audit.js";
 import { desktopDir } from "./script.js";
@@ -37,6 +39,11 @@ export async function runProtect(args, opts, { banner, applyPolicy, geminiSetup 
   logLine(keys.malwareBazaar ? "ok" : "skip", "malwarebazaar", keys.malwareBazaar ? "hash lookups on" : "add MALWAREBAZAAR_KEY to look hashes up (free)");
   logLine(keys.virusTotal ? "ok" : "skip", "virustotal", keys.virusTotal ? "hash lookups on, 4 a minute" : "add VIRUSTOTAL_KEY to look hashes up (free)");
   if (online && (keys.malwareBazaar || keys.virusTotal)) logLine("info", "privacy", "only SHA-256 hashes go to the malware databases");
+  const intel = intelStatus();
+  const feeds = Object.values(intel).filter((f) => f.count);
+  logLine(feeds.length ? "ok" : "info", "threat intel", feeds.length ? `${feeds.length} open feeds: ${feeds.map((f) => `${f.label} ${f.count.toLocaleString()}`).join(", ")}` : online ? "downloading the open feeds (abuse.ch, LOLDrivers)" : "no feeds yet, run cleaner intel");
+  const yara = yaraStatus();
+  logLine(yara.ready ? "ok" : "skip", "yara", yara.ready ? `${yara.rules?.count?.toLocaleString() ?? "?"} YARA Forge rules (${yara.rules?.release ?? "?"})` : "not installed, run cleaner yara install");
   logLine("ok", "target", mode === "quick" ? "startup entries, Downloads, Desktop, temp folders, AppData" : mode === "full" ? "your whole user folder" : roots.map(shortPath).join(", "));
   console.log();
 
@@ -49,6 +56,7 @@ export async function runProtect(args, opts, { banner, applyPolicy, geminiSetup 
     ai: useAi ? { apiKey, models } : null,
     keys,
     blocklists,
+    online,
     onEvent: (e) => {
       if (e.type === "phase") task.label = PHASES[e.phase] ?? e.phase;
       else if (e.type === "walk") task.update(c.gray(truncateMiddle(`${e.files.toLocaleString()} files, ${e.candidates.toLocaleString()} to inspect  ${shortPath(e.current)}`, detailRoom())));
@@ -86,6 +94,21 @@ export async function runProtect(args, opts, { banner, applyPolicy, geminiSetup 
       if (r.ai) console.log(`  ${" ".repeat(17)}${c.faint("gemini:")} ${c.dim(truncateEnd(`${r.ai.verdict}, ${r.ai.reason}`, Math.max(20, width - 29)))}`);
     }
     if (result.results.length > 60) console.log(c.gray(`  …and ${result.results.length - 60} more in the desktop app`));
+    console.log();
+  }
+  const live = result.behavior;
+  if (live && (live.processes.length || live.drivers.length)) {
+    rule("running now");
+    for (const p of live.processes.slice(0, 20)) {
+      const why = p.detections.length ? p.detections.map((d) => d.name).join("; ") : p.findings.map((f) => f.label).join("; ");
+      console.log(`  ${TAG[p.severity]?.(LABEL[p.severity]) ?? p.severity}  ${c.white(`${p.name} (pid ${p.pid})`)}  ${c.gray(truncateMiddle(shortPath(p.path ?? ""), Math.max(20, columns() - 40)))}`);
+      console.log(`  ${" ".repeat(9)}${c.faint("└─")} ${c.dim(truncateEnd(why, columns() - 16))}`);
+    }
+    for (const d of live.drivers) {
+      console.log(`  ${TAG[d.severity]?.(LABEL[d.severity]) ?? d.severity}  ${c.white(`driver ${d.name}`)}  ${c.gray(truncateMiddle(shortPath(d.path ?? ""), Math.max(20, columns() - 40)))}`);
+      console.log(`  ${" ".repeat(9)}${c.faint("└─")} ${c.dim(truncateEnd(d.label, columns() - 16))}`);
+    }
+    console.log(c.gray(`  ${live.stats.processes} programs running, ${live.stats.external} internet connections, ${live.stats.drivers} drivers loaded`));
     console.log();
   }
   const odd = result.startups.filter((x) => x.severity !== "clean");
@@ -153,6 +176,42 @@ export function quarantine(picked, result, { app }) {
   saveThreatScan(result);
   audit("quarantine", { app, items: done.map((r) => ({ path: r.path, size: r.size, result: r.severity })) });
   return done;
+}
+
+// `cleaner intel`: refresh the open threat-intel feeds now.
+export async function runIntel(args, { banner }) {
+  banner();
+  const task = new Task("threat intel").animate();
+  const report = await updateIntel({ force: true, onProgress: (p) => task.update(c.gray(p.label)) });
+  task.done("updated");
+  for (const [name, r] of Object.entries(report)) logLine(r.ok ? "ok" : "warn", name, r.ok ? `${r.count.toLocaleString()} entries` : r.error);
+  console.log(c.gray("\n  Public lists only; nothing about this PC was sent.\n"));
+}
+
+// `cleaner yara install` / `cleaner yara update`: the YARA engine and the YARA Forge core rules.
+export async function runYara(args, { banner }) {
+  banner();
+  const status = yaraStatus();
+  const action = args[0] === "update" ? "update" : args[0] === "install" ? "install" : null;
+  logLine(status.ready ? "ok" : "info", "yara", status.ready ? `engine ${status.engine?.version}, ${status.rules?.count?.toLocaleString()} rules (${status.rules?.release})` : "not installed");
+  if (!action) {
+    console.log(`\n  ${c.gray("Install with")} ${c.hi("cleaner yara install")}${c.gray(", refresh the rules with")} ${c.hi("cleaner yara update")}${c.gray(".")}\n`);
+    return;
+  }
+  if (action === "update" && !status.ready) throw new Error("YARA is not installed yet, run cleaner yara install");
+  const what = action === "install" ? "the YARA engine (VirusTotal, about 2 MB) and the YARA Forge core rules (about 2 MB)" : "the latest YARA Forge core rules (about 2 MB)";
+  console.log();
+  const yes = await askKey(`  ${c.hi(">")} ${c.white(`download ${what} from GitHub? each file must match its published checksum`)} ${c.gray("[y/N]")} `);
+  console.log();
+  if (!yes) {
+    logLine("ok", "cancelled", "nothing was downloaded");
+    console.log();
+    return;
+  }
+  const task = new Task(action === "install" ? "installing yara" : "updating rules").animate();
+  const r = action === "install" ? await installYara({ onProgress: (s) => task.update(c.gray(s)) }) : { rules: await updateYaraRules({ onProgress: (s) => task.update(c.gray(s)) }) };
+  task.done(`${r.rules.count.toLocaleString()} rules ready (${r.rules.release})`);
+  console.log();
 }
 
 export async function runQuarantine(args, { banner }) {

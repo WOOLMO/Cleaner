@@ -8,6 +8,9 @@ import { loadBlocklist, loadTrusted, checkSignatures, defenderStatus, defenderSc
 import { runPowerShell } from "./powershell.js";
 import { Gemini } from "./gemini.js";
 import { DATA_DIR } from "./config.js";
+import { updateIntel, loadIntel, intelStatus, hostsIn, hashLookup } from "./intel.js";
+import { yaraStatus, scanYara } from "./yara.js";
+import { snapshot, analyzeBehavior } from "./behavior.js";
 
 // The threat scan: an on-demand second opinion next to the real-time antivirus.
 // Severity: "threat" needs hard evidence (a known-bad hash, an antivirus engine, a malware database);
@@ -105,16 +108,37 @@ export async function runThreatScan({
   blocklists = [],
   useDefender = true,
   autostart = true,
+  online = true, // threat-intel updates and CIRCL hashlookup (hashes only)
+  useIntel = true,
+  useYara = true,
+  behavior = true,
   signal,
   onEvent = () => {},
   run = runPowerShell,
   fetchImpl = globalThis.fetch,
 } = {}) {
   const started = Date.now();
-  const engines = { rules: true, hashList: true, defender: null, malwareBazaar: Boolean(keys.malwareBazaar), virusTotal: Boolean(keys.virusTotal), gemini: Boolean(ai) };
+  const engines = { rules: true, hashList: true, defender: null, malwareBazaar: Boolean(keys.malwareBazaar), virusTotal: Boolean(keys.virusTotal), gemini: Boolean(ai), intel: null, yara: null, hashlookup: Boolean(online), behavior: Boolean(behavior) };
   const errors = [];
   const blocklist = loadBlocklist(blocklists);
   const trusted = loadTrusted();
+
+  // 0. Open threat intelligence: refresh stale feeds (public lists, nothing about this PC is sent).
+  let intel = null;
+  if (useIntel) {
+    if (online) {
+      onEvent({ type: "phase", phase: "intel" });
+      try {
+        const report = await updateIntel({ fetchImpl, signal });
+        for (const [name, r] of Object.entries(report)) if (!r.ok) errors.push(`${name} feed: ${r.error}`);
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        errors.push(`threat intel: ${err.message}`);
+      }
+    }
+    intel = loadIntel();
+    engines.intel = intelStatus();
+  }
 
   // 1. What starts with Windows.
   onEvent({ type: "phase", phase: "autostart" });
@@ -216,7 +240,19 @@ export async function runThreatScan({
     const detections = [];
     const listed = blocklist.get(f.sha256) ?? (f.trimmedSha256 ? blocklist.get(f.trimmedSha256) : undefined);
     if (listed) detections.push({ source: "hash", name: listed });
-    return { c, f, signer, ...verdict, detections, ai: null, reputation: [] };
+    if (intel) {
+      if (f.sha256 && intel.hashes.has(f.sha256)) detections.push({ source: "malwarebazaar-feed", name: "A recent malware sample (MalwareBazaar feed)" });
+      const driver = f.sha256 ? intel.drivers.get(f.sha256) : null;
+      if (driver?.malicious) detections.push({ source: "loldrivers", name: `A known malicious driver (${driver.name})` });
+      else if (driver) verdict.findings.push({ id: "vulnerable-driver", weight: 6, label: "A driver known to be abused to switch off security software (LOLDrivers)", detail: driver.name, counted: true });
+      const from = f.zone?.url ? hostsIn(f.zone.url)[0] : null;
+      if (from && intel.hosts.has(from)) detections.push({ source: "urlhaus", name: `Downloaded from a known malware site (${from})` });
+      const bad = (f.hosts ?? []).find((h) => intel.hosts.has(h));
+      if (bad) detections.push({ source: "urlhaus", name: `Points to a known malware site (${bad})` });
+    }
+    const it = { c, f, signer, ...verdict, detections, ai: null, reputation: [], adjust: 0 };
+    rescore(it);
+    return it;
   });
 
   const defender = await defenderPromise;
@@ -233,6 +269,31 @@ export async function runThreatScan({
     } catch (err) {
       if (signal?.aborted) throw err;
       errors.push(`defender: ${err.message}`);
+    }
+  }
+
+  // 5b. YARA with the YARA Forge community rules, when the user installed them.
+  const yara = useYara ? yaraStatus() : null;
+  if (yara?.ready) {
+    engines.yara = { rules: yara.rules?.count ?? null, release: yara.rules?.release ?? null };
+    onEvent({ type: "phase", phase: "yara" });
+    const targets = items.filter((it) => !it.f.cloudOnly && !it.f.error && it.f.size > 0 && it.f.size <= 64 * 1024 * 1024);
+    try {
+      const hits = await scanYara(targets.map((it) => it.c.path), { signal });
+      const byFile = new Map(items.map((it) => [it.c.path.toLowerCase(), it]));
+      for (const h of hits) {
+        const it = byFile.get(h.file.toLowerCase());
+        if (!it) continue;
+        const name = `${h.rule.replace(/_/g, " ")}${h.description ? `: ${h.description}` : ""}`;
+        // YARA Forge scores its rules 0-100; strong rules are evidence, weaker ones a warning sign
+        if (h.score === null || h.score >= 75) it.detections.push({ source: "yara", name });
+        else it.findings.push({ id: `yara:${h.rule}`, weight: h.score >= 60 ? 5 : 3, label: `Matches the YARA rule ${h.rule}`, detail: h.description, counted: true });
+      }
+      for (const it of items) rescore(it);
+      onEvent({ type: "yara", done: targets.length, total: targets.length });
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      errors.push(`yara: ${err.message}`);
     }
   }
 
@@ -273,6 +334,34 @@ export async function runThreatScan({
     }
   }
 
+  // 6b. CIRCL hashlookup: is a flagged file a known legitimate file, or a known malicious sample?
+  if (online) {
+    const flagged = items.filter((it) => it.f.sha256 && it.score >= 3 && !it.detections.length).sort((a, b) => b.score - a.score).slice(0, 80);
+    if (flagged.length) {
+      onEvent({ type: "phase", phase: "reputation" });
+      let n = 0;
+      let failed = false;
+      await pool(flagged, 4, async (it) => {
+        if (failed) return;
+        try {
+          const r = await hashLookup(it.f.sha256, { fetchImpl, signal });
+          if (r.malicious) it.detections.push({ source: "hashlookup", name: `A known malicious sample (CIRCL hashlookup, reported by ${r.malicious})` });
+          else if (r.known) {
+            it.adjust -= 4;
+            it.findings.push({ id: "known-good", weight: 0, label: "A known legitimate file (CIRCL hashlookup)", detail: r.name ?? null, counted: false });
+          }
+          it.reputation.push({ source: "hashlookup", found: r.known, label: r.malicious ?? r.name ?? null });
+          rescore(it);
+        } catch (err) {
+          if (signal?.aborted) throw err;
+          failed = true;
+          errors.push(`hashlookup: ${err.message}`);
+        }
+        onEvent({ type: "reputation", done: ++n, total: flagged.length });
+      }, signal);
+    }
+  }
+
   // 7. Gemini's second opinion on what the rules flagged. It can move a score, never prove a threat.
   const forAi = items.filter((it) => it.score >= 3 && !it.detections.length).sort((a, b) => b.score - a.score).slice(0, 60);
   let aiError = null;
@@ -307,9 +396,9 @@ export async function runThreatScan({
           const it = batch[r.id - 1];
           if (!it) continue;
           it.ai = { verdict: r.verdict, confidence: Math.max(0, Math.min(1, Number(r.confidence) || 0)), reason: String(r.reason ?? "").slice(0, 160) };
-          if (it.ai.confidence >= 0.7 && it.ai.verdict === "likely-benign") it.score = Math.max(0, it.score - 3);
-          if (it.ai.confidence >= 0.7 && it.ai.verdict === "likely-malicious") it.score += 3;
-          it.level = it.score >= 6 ? "suspicious" : it.score >= 3 ? "notice" : "clean";
+          if (it.ai.confidence >= 0.7 && it.ai.verdict === "likely-benign") it.adjust -= 3;
+          if (it.ai.confidence >= 0.7 && it.ai.verdict === "likely-malicious") it.adjust += 3;
+          rescore(it);
         }
         onEvent({ type: "ai", done: Math.min(i + 30, forAi.length), total: forAi.length });
       }
@@ -317,6 +406,23 @@ export async function runThreatScan({
     } catch (err) {
       if (signal?.aborted) throw err;
       aiError = err.message;
+    }
+  }
+
+  // 7b. Behavior: what is running right now, what it talks to, and which drivers are loaded.
+  let live = null;
+  if (behavior) {
+    onEvent({ type: "phase", phase: "behavior" });
+    try {
+      const snap = await snapshot({ run, signal });
+      const images = [...new Set(snap.processes.map((p) => p.path).filter((p) => p && !/^[a-z]:\\windows\\/i.test(p)))];
+      const procSigners = new Map(signers);
+      const missing = images.filter((p) => !procSigners.has(p.toLowerCase()) && fs.existsSync(p));
+      if (missing.length) for (const [k, v] of await checkSignatures(missing, { run, signal })) procSigners.set(k, v);
+      live = analyzeBehavior(snap, { signers: procSigners, intel });
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      errors.push(`behavior: ${err.message}`);
     }
   }
 
@@ -383,12 +489,20 @@ export async function runThreatScan({
       threats: results.filter((r) => r.severity === "threat").length,
       suspicious: results.filter((r) => r.severity === "suspicious").length,
       notices: results.filter((r) => r.severity === "notice").length,
+      liveFlags: live ? live.processes.length + live.drivers.length : 0,
     },
     engines: { ...engines, defenderReason: defender.reason ?? null, model, aiError },
     results,
     startups: startupView,
+    behavior: live,
     errors,
   };
+}
+
+// Score = the counted warning signs plus outside opinions (Gemini, known-good lists), never below zero.
+function rescore(it) {
+  it.score = Math.max(0, it.findings.filter((f) => f.counted).reduce((s, f) => s + f.weight, 0) + (it.adjust ?? 0));
+  it.level = it.score >= 6 ? "suspicious" : it.score >= 3 ? "notice" : "clean";
 }
 
 function isUserPlace(p) {

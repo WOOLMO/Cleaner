@@ -72,6 +72,14 @@ if (process.argv.includes("--cleaner-demo")) {
     restoreQuarantine: invoke("quarantine:restore"),
     deleteQuarantine: invoke("quarantine:delete"),
     setServiceKey: invoke("keys:set"),
+    updateIntel: invoke("protect:intelUpdate"),
+    setupYara: invoke("protect:yara"),
+    onSetupEvent: listen("protect:setupEvent"),
+    endProcess: invoke("protect:endProcess"),
+    watchEvents: invoke("protect:watchEvents"),
+    onWatchEvent: listen("protect:watchEvent"),
+    watchQuarantine: invoke("protect:watchQuarantine"),
+    watchDismiss: invoke("protect:watchDismiss"),
     clearServiceKey: invoke("keys:clear"),
   });
 }

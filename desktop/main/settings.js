@@ -12,6 +12,7 @@ export const DEFAULT_SETTINGS = {
   largeMB: DEFAULTS.largeFileMB,
   exclude: [],
   targets: [],
+  watch: true,
 };
 
 const isAbsoluteList = (v) => Array.isArray(v) && v.length <= 200 && v.every((p) => typeof p === "string" && path.isAbsolute(p));
@@ -23,6 +24,7 @@ const RULES = {
   largeMB: (v) => Number.isInteger(v) && v >= 10 && v <= 100_000,
   exclude: isAbsoluteList,
   targets: isAbsoluteList,
+  watch: (v) => typeof v === "boolean",
 };
 
 // Unknown keys and invalid values are dropped, never stored.

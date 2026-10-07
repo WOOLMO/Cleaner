@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { app, BrowserWindow, ipcMain, Menu, nativeTheme, session, shell } from "electron";
 import { registerIpc } from "./ipc.js";
 import { readSettings } from "./settings.js";
+import { startWatch } from "./watch.js";
 import { log } from "./log.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -105,6 +106,8 @@ app.whenReady().then(() => {
 
   log.info(`Cleaner ${app.getVersion()} starting${DEMO ? " in demo mode" : ""}`);
   createWindow();
+  // watch mode runs while the app is open, on real data only
+  if (!DEMO && !CAPTURE_DIR && readSettings().watch) startWatch();
 });
 
 app.on("second-instance", () => {

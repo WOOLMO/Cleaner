@@ -285,7 +285,7 @@ test("a full scan of a folder: clean files stay quiet, a blocklisted file is a t
   const bad = crypto.createHash("sha256").update("@echo building\r\n").digest("hex");
   fs.writeFileSync(path.join(process.env.CLEANER_HOME, "blocklist.txt"), `${bad} Test.Blocklisted\n`);
   const events = [];
-  const r = await runThreatScan({ mode: "custom", roots: [root], autostart: false, useDefender: false, run: async () => "[]", onEvent: (e) => events.push(e.type) });
+  const r = await runThreatScan({ mode: "custom", roots: [root], autostart: false, useDefender: false, online: false, behavior: false, run: async () => "[]", onEvent: (e) => events.push(e.type) });
   assert.equal(r.stats.inspected, 2, "the two scripts, not the notes");
   assert.equal(r.results.length, 1);
   assert.equal(r.results[0].severity, "threat");

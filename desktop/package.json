@@ -1,7 +1,7 @@
 {
   "name": "cleaner-desktop",
   "productName": "Cleaner",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "Find the junk eating your Windows drive, let Gemini double-check it, and remove only what you approve.",
   "type": "module",
   "main": "main/main.js",

@@ -124,8 +124,13 @@ export function parsePE(fd, fileSize = Buffer.isBuffer(fd) ? fd.length : 0) {
     }
   }
 
+  // where execution starts: normally inside the code section
+  const entry = opt.length >= 20 ? opt.readUInt32LE(16) : 0;
+  const entryIndex = entry ? sections.findIndex((s) => entry >= s.rva && entry < s.rva + Math.max(s.virtualSize, s.rawSize)) : -1;
   const security = dir(4);
   return {
+    entry,
+    entrySection: entryIndex >= 0 ? { name: sections[entryIndex].name, exec: sections[entryIndex].exec, last: entryIndex === sections.length - 1, entropy: sections[entryIndex].entropy } : null,
     is64,
     machine,
     dll: Boolean(characteristics & 0x2000),
