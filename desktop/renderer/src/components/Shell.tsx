@@ -1,4 +1,4 @@
-import { Archive, Building2, FolderTree, Gauge, History, LayoutGrid, LoaderCircle, ScanSearch, Search, Settings, Wand2 } from "lucide-react";
+import { Archive, Building2, FolderTree, Gauge, History, LayoutGrid, LoaderCircle, ScanSearch, Search, Settings, ShieldCheck, Wand2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { go, store, useStore, type Page } from "../store";
 import { formatSize } from "../format";
@@ -24,6 +24,7 @@ export function TitleBar() {
 const NAV: { page: Page; label: string; icon: ReactNode }[] = [
   { page: "overview", label: "Overview", icon: <Gauge size={17} /> },
   { page: "scan", label: "Scan", icon: <ScanSearch size={17} /> },
+  { page: "protect", label: "Protection", icon: <ShieldCheck size={17} /> },
   { page: "organize", label: "Organize", icon: <Wand2 size={17} /> },
   { page: "map", label: "Space map", icon: <LayoutGrid size={17} /> },
   { page: "graph", label: "Folder graph", icon: <FolderTree size={17} /> },
@@ -40,8 +41,10 @@ export function Rail() {
   const settings = useStore((s) => s.settings);
   const orgBusy = useStore((s) => s.org.planning || s.org.applying);
   const graphBusy = useStore((s) => s.graph.loading);
-  const busy: Partial<Record<Page, boolean>> = { scan: scanRunning, map: mapRunning, organize: orgBusy, graph: graphBusy };
-  const counts: Partial<Record<Page, number>> = { holding: held.length };
+  const protectBusy = useStore((s) => s.protect.running);
+  const threats = useStore((s) => s.protect.scan?.results.filter((r) => r.severity === "threat" && r.status === "found").length ?? 0);
+  const busy: Partial<Record<Page, boolean>> = { scan: scanRunning, map: mapRunning, organize: orgBusy, graph: graphBusy, protect: protectBusy };
+  const counts: Partial<Record<Page, number>> = { holding: held.length, protect: threats };
 
   return (
     <nav className="rail" aria-label="Main">

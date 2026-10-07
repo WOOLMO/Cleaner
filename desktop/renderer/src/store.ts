@@ -2,10 +2,25 @@ import { useSyncExternalStore } from "react";
 import { api } from "./api";
 import { formatSize, setHome } from "./format";
 import type {
-  AppInfo, AuditEntry, Drive, GraphNode, Held, MapResult, OrganizePlace, OrganizePlan, OrganizeRun, ScanEvent, ScanResult, SettingsView,
+  AppInfo, AuditEntry, Drive, FolderNetwork, GraphNode, Held, MapResult, OrganizePlace, OrganizePlan, OrganizeRun, ProtectStatus, Quarantined, ScanEvent, ScanResult,
+  ServiceName, SettingsView, ThreatEvent, ThreatScan,
 } from "./types";
 
-export type Page = "overview" | "scan" | "organize" | "map" | "graph" | "holding" | "activity" | "settings";
+export type Page = "overview" | "scan" | "protect" | "organize" | "map" | "graph" | "holding" | "activity" | "settings";
+
+export interface ThreatProgress {
+  phase: "autostart" | "walk" | "inspect" | "signatures" | "defender" | "reputation" | "ai";
+  done: Set<string>;
+  startups: number;
+  files: number;
+  candidates: number;
+  inspected: number;
+  total: number;
+  signatures: number;
+  step: { done: number; total: number } | null;
+  current: string;
+  startedAt: number;
+}
 
 export interface Toast {
   id: number;
@@ -59,7 +74,24 @@ export interface State {
     run: OrganizeRun | null; // the run just applied, shown with its undo button
     history: OrganizeRun[];
   };
-  graph: { root: string | null; tree: GraphNode | null; loading: boolean; expanding: string | null };
+  graph: {
+    root: string | null;
+    tree: GraphNode | null;
+    loading: boolean;
+    expanding: string | null;
+    mode: "graph" | "network";
+    network: FolderNetwork | null;
+    building: { root: string; files: number; bytes: number; current: string; startedAt: number } | null;
+  };
+  protect: {
+    status: ProtectStatus | null;
+    scan: ThreatScan | null;
+    running: boolean;
+    progress: ThreatProgress | null;
+    quarantine: Quarantined[];
+    focus: number | null; // a result opened in the drawer (also used by screenshot mode)
+    tab: "findings" | "startup" | "quarantine";
+  };
 }
 
 let state: State = {
@@ -82,7 +114,8 @@ let state: State = {
   toasts: [],
   palette: false,
   org: { places: [], root: null, plan: null, planning: false, applying: false, run: null, history: [] },
-  graph: { root: null, tree: null, loading: false, expanding: null },
+  graph: { root: null, tree: null, loading: false, expanding: null, mode: "graph", network: null, building: null },
+  protect: { status: null, scan: null, running: false, progress: null, quarantine: [], focus: null, tab: "findings" },
 };
 
 const listeners = new Set<() => void>();
@@ -121,6 +154,8 @@ export async function boot() {
   ]);
   setHome(info.home);
   store.set({ info, settings, drives, scan, map, held, activity, ready: true });
+  // Protection status asks Defender through PowerShell, so it loads after the window is up.
+  loadProtect().catch(() => {});
 }
 
 export const refreshDrives = async () => store.set({ drives: await api.drives() });
@@ -309,12 +344,151 @@ export async function expandGraph(path: string) {
   }
 }
 
+// ---- full folder network ----
+export async function buildNetwork(root: string) {
+  if (store.get().graph.building) return;
+  setGraph({ mode: "network", building: { root, files: 0, bytes: 0, current: "", startedAt: Date.now() } });
+  const off = api.onNetworkEvent((ev) => store.set((s) => ({ graph: { ...s.graph, building: s.graph.building ? { ...s.graph.building, ...ev } : null } })));
+  try {
+    const r = await api.graphNetwork({ root });
+    if (r.ok) setGraph({ network: r.network });
+    else if (r.cancelled) setGraph({ mode: store.get().graph.network ? "network" : "graph" });
+    else toast("error", "Could not map every folder", r.error);
+  } catch (err) {
+    toast("error", "Could not map every folder", message(err));
+  } finally {
+    off();
+    setGraph({ building: null });
+  }
+}
+export const cancelNetwork = () => api.graphNetworkCancel();
+export const setGraphMode = (mode: "graph" | "network") => setGraph({ mode });
+
 export function collapseGraph(path: string) {
   const current = store.get().graph.tree;
   if (!current) return;
   const strip = (node: GraphNode): GraphNode =>
     node.path === path ? { ...node, children: undefined, partial: false } : node.children ? { ...node, children: node.children.map(strip) } : node;
   setGraph({ tree: strip(current) });
+}
+
+// ---- protection ----
+export const setProtect = (patch: Partial<State["protect"]>) => store.set((s) => ({ protect: { ...s.protect, ...patch } }));
+
+export async function loadProtect() {
+  const [status, scan, quarantine] = await Promise.all([api.protectStatus(), api.lastThreatScan(), api.listQuarantine()]);
+  setProtect({ status, scan, quarantine });
+}
+
+function applyThreatEvent(p: ThreatProgress, ev: ThreatEvent): ThreatProgress {
+  switch (ev.type) {
+    case "phase":
+      return { ...p, phase: ev.phase, done: new Set([...p.done, p.phase]), step: null, current: "" };
+    case "autostart":
+      return { ...p, startups: ev.count };
+    case "walk":
+      return { ...p, files: ev.files, candidates: ev.candidates, current: ev.current };
+    case "walked":
+      return { ...p, files: ev.files, candidates: ev.candidates };
+    case "inspect":
+      return { ...p, inspected: ev.done, total: ev.total, current: ev.current };
+    case "signatures":
+      return { ...p, signatures: ev.checked };
+    default:
+      return { ...p, step: { done: ev.done, total: ev.total } };
+  }
+}
+
+export async function startThreatScan(mode: ThreatScan["mode"], roots: string[] = []) {
+  if (store.get().protect.running) return;
+  const progress: ThreatProgress = { phase: "autostart", done: new Set(), startups: 0, files: 0, candidates: 0, inspected: 0, total: 0, signatures: 0, step: null, current: "", startedAt: Date.now() };
+  setProtect({ running: true, progress, focus: null, tab: "findings" });
+  store.set({ page: "protect" });
+  const off = api.onThreatEvent((ev) => store.set((s) => ({ protect: { ...s.protect, progress: s.protect.progress ? applyThreatEvent(s.protect.progress, ev) : null } })));
+  try {
+    const r = await api.startThreatScan({ mode, roots });
+    if (r.ok) {
+      setProtect({ scan: r.scan });
+      const { threats, suspicious } = r.scan.stats;
+      if (threats) toast("error", `${threats} threat${threats === 1 ? "" : "s"} found`, "Review them below. Nothing has been moved yet.");
+      else if (suspicious) toast("warn", `${suspicious} file${suspicious === 1 ? "" : "s"} worth a look`, "No known malware, but some strong warning signs.");
+      else toast("ok", "No threats found", `${r.scan.stats.inspected.toLocaleString()} files inspected.`);
+    } else if (r.cancelled) toast("info", "Threat scan cancelled");
+    else toast("error", "The threat scan stopped", r.error);
+  } catch (err) {
+    toast("error", "The threat scan stopped", message(err));
+  } finally {
+    off();
+    setProtect({ running: false, progress: null, status: await api.protectStatus() });
+    refreshActivity();
+  }
+}
+export const cancelThreatScan = () => api.cancelThreatScan();
+
+export async function quarantineItems(ids: number[]) {
+  try {
+    const r = await api.quarantineItems(ids);
+    setProtect({ scan: r.scan, quarantine: await api.listQuarantine(), status: await api.protectStatus() });
+    if (r.done) toast("ok", `${r.done} file${r.done === 1 ? "" : "s"} quarantined`, "They can't run now. Restore them any time from the Quarantine tab.");
+    for (const f of r.failed) toast("warn", "Not moved", f.reason);
+  } catch (err) {
+    toast("error", "Nothing was quarantined", message(err));
+  } finally {
+    refreshActivity();
+  }
+}
+
+export async function trustItem(id: number) {
+  try {
+    setProtect({ scan: await api.trustItem(id) });
+    toast("ok", "Marked as trusted", "Future scans skip this exact file unless an antivirus engine flags it.");
+  } catch (err) {
+    toast("error", "Could not trust the file", message(err));
+  }
+}
+
+export async function lookupItem(id: number) {
+  try {
+    const r = await api.lookupItem(id);
+    if (r.opened) toast("info", "Opened VirusTotal in your browser", "Only the file's fingerprint is in the link; the file is not uploaded.");
+    else setProtect({ scan: r.scan });
+  } catch (err) {
+    toast("error", "VirusTotal lookup failed", message(err));
+  }
+}
+
+export async function restoreQuarantine(id: string) {
+  try {
+    setProtect({ quarantine: await api.restoreQuarantine(id), scan: await api.lastThreatScan(), status: await api.protectStatus() });
+    toast("ok", "File restored", "It is back where it was.");
+  } catch (err) {
+    toast("error", "Could not restore", message(err));
+  } finally {
+    refreshActivity();
+  }
+}
+
+export async function deleteQuarantine(id: string) {
+  try {
+    setProtect({ quarantine: await api.deleteQuarantine(id), status: await api.protectStatus() });
+    toast("ok", "Deleted for good");
+  } catch (err) {
+    toast("error", "Could not delete", message(err));
+  } finally {
+    refreshActivity();
+  }
+}
+
+export async function setServiceKey(name: ServiceName, key: string) {
+  const r = await api.setServiceKey({ name, key });
+  if (r.ok) {
+    setProtect({ status: r.status });
+    toast("ok", "Key saved", "It is encrypted for your Windows account.");
+  }
+  return r;
+}
+export async function clearServiceKey(name: ServiceName) {
+  setProtect({ status: await api.clearServiceKey(name) });
 }
 
 export async function saveSettings(patch: Parameters<typeof api.setSettings>[0]) {

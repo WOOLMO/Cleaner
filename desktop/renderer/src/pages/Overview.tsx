@@ -1,4 +1,4 @@
-import { Archive, ArrowUpRight, Clock, HardDrive, LayoutGrid, Play, Sparkles } from "lucide-react";
+import { Archive, ArrowUpRight, Clock, HardDrive, LayoutGrid, Play, ShieldCheck, Sparkles } from "lucide-react";
 import { go, startMap, startScan, useStore } from "../store";
 import { Empty, PageHead, Ring } from "../components/ui";
 import { ActionIcon, describe } from "../components/activity";
@@ -14,6 +14,7 @@ export function Overview() {
   const map = useStore((s) => s.map);
   const activity = useStore((s) => s.activity);
   const settings = useStore((s) => s.settings);
+  const threat = useStore((s) => s.protect.scan);
   if (!info) return null;
 
   const drive = drives.find((d) => d.letter === "C") ?? drives[0];
@@ -137,6 +138,16 @@ export function Overview() {
           </span>
           <span className="v" style={{ fontSize: 22 }}>{formatSize(sum(held))}</span>
           <span className="d">{held.length ? `${held.length} items, freed when you purge` : "Empty. Held items can be put back."}</span>
+        </button>
+        <button type="button" className="tile" onClick={() => go("protect")}>
+          <span className="k">
+            <ShieldCheck size={14} />
+            Protection
+          </span>
+          <span className="v" style={{ fontSize: 22, color: !threat ? "var(--text-2)" : threat.stats.threats ? "var(--red)" : threat.stats.suspicious ? "var(--amber)" : "var(--accent)" }}>
+            {!threat ? "Not scanned" : threat.stats.threats ? `${threat.stats.threats} threats` : threat.stats.suspicious ? `${threat.stats.suspicious} to check` : "No threats"}
+          </span>
+          <span className="d">{threat ? `Threat scan ${timeAgo(threat.finishedAt)}, ${formatCount(threat.stats.inspected)} files` : "Run a one-minute quick scan"}</span>
         </button>
         <button type="button" className="tile" onClick={() => go("settings")}>
           <span className="k">

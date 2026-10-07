@@ -11,3 +11,7 @@ export { audit, readAudit, AUDIT_FILE } from "../core/audit.js";
 export { DEFAULTS, DATA_DIR, loadEnv } from "../core/config.js";
 export { analyzeFolder, rulePlan, aiPlan, applyPlan, undoOrganize, listJournals, organizeBlocked, cleanFolderName, LANGUAGE_NAMES } from "../core/organize.js";
 export { readGraph, readLevel, isInside } from "../core/graph.js";
+export { buildNetwork } from "../core/network.js";
+export { runThreatScan, saveThreatScan, readThreatScan } from "../core/protect.js";
+export { quarantineFile, listQuarantine, restoreQuarantined, deleteQuarantined } from "../core/quarantine.js";
+export { loadBlocklist, trustHash, defenderStatus, virusTotal, malwareBazaar, virusTotalPage } from "../core/reputation.js";

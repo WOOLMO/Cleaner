@@ -12,6 +12,7 @@ import { isSafeToRemove, removePermanently, freeBytes } from "./remove.js";
 import { holdItems, listHeld, restoreHeld, purgeHeld, HOLD_DIR } from "./hold.js";
 import { writeRemovalScript, desktopDir } from "./script.js";
 import { askKey, askLine, closeInput } from "./input.js";
+import { runProtect, runQuarantine } from "./cli-protect.js";
 import { analyzeFolder, rulePlan, aiPlan, applyPlan, undoOrganize, listJournals, organizeBlocked, LANGUAGE_NAMES } from "./organize.js";
 import {
   c, banner, logLine, Task, box, bar, rule, verdictTag, columns, detailRoom,
@@ -19,7 +20,7 @@ import {
 } from "./ui.js";
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
-const COMMANDS = ["scan", "map", "organize", "clean", "list", "export", "restore", "purge", "setup", "help"];
+const COMMANDS = ["scan", "map", "organize", "protect", "quarantine", "clean", "list", "export", "restore", "purge", "setup", "help"];
 const sum = (list) => list.reduce((total, e) => total + e.size, 0);
 const seconds = (ms) => `${(ms / 1000).toFixed(1)}s`;
 
@@ -44,6 +45,7 @@ function parseArgs(argv) {
       case "--dry-run": opts.dryRun = true; break;
       case "--hold": opts.hold = true; break;
       case "--undo": opts.undo = true; break;
+      case "--dev": opts.dev = true; break;
       case "--db": opts.db = path.resolve(value()); break;
       case "--out": opts.out = path.resolve(value()); break;
       case "--model": opts.model = value(); break;
@@ -69,6 +71,8 @@ function help() {
   line("cleaner map [folder]", "the biggest folders on the drive, explained");
   line("cleaner organize [folder]", "tidy loose files into folders, your way (default: Desktop)");
   line("cleaner organize --undo", "put the last organize run back");
+  line("cleaner protect [full|folder]", "threat scan: startup entries, downloads, temp (default)");
+  line("cleaner quarantine", "list, restore or delete quarantined files");
   line("cleaner clean", "pick items from the last scan and remove them");
   line("cleaner list", "show the last scan");
   line("cleaner export", "write the removal script from the last scan");
@@ -78,7 +82,8 @@ function help() {
   console.log();
   rule("options");
   line("--hold", "move items to a holding area instead of deleting");
-  line("--offline", "local rules only, nothing goes to gemini");
+  line("--offline", "local rules only, nothing goes to gemini or malware databases");
+  line("--dev", "protect: also look inside node_modules, .git and venvs");
   line("--no-content", "gemini gets names, sizes and dates, no previews");
   line("--max-ai <n>", `ask gemini about at most n items (default ${DEFAULTS.maxAi})`);
   line("--large <MB>", `also ask about files over this size (default ${DEFAULTS.largeFileMB})`);
@@ -97,12 +102,13 @@ function help() {
 let policy = null;
 function applyPolicy(opts) {
   policy = loadPolicy();
-  if (!policy.managed) return;
+  if (!policy.managed) return policy;
   logLine(policy.error ? "warn" : "info", "policy", policy.error ?? `managed by ${policy.organization ?? "your organization"}`);
   if (policy.aiEnabled === false) opts.policyNoAi = true;
   if (policy.allowPreviews === false) opts.noContent = true;
   if (policy.allowPermanentDelete === false) opts.hold = true;
   if (policy.maxAiItems !== undefined) opts.maxAi = Math.min(opts.maxAi ?? DEFAULTS.maxAi, policy.maxAiItems);
+  return policy;
 }
 
 function geminiSetup(opts) {
@@ -678,6 +684,8 @@ export async function main(argv) {
     loadEnv();
     migrateOldDb();
     if (cmd === "map") await runMap(args, opts);
+    else if (cmd === "protect") await runProtect(args, opts, { banner: () => banner(VERSION), applyPolicy, geminiSetup });
+    else if (cmd === "quarantine") await runQuarantine(args, { banner: () => banner(VERSION) });
     else if (cmd === "organize") await (opts.undo ? runOrganizeUndo() : runOrganize(args, opts));
     else if (cmd === "list") runList(opts);
     else if (cmd === "export") runExport(opts);

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowUpRight, ChevronRight, Eye, EyeOff, File, Folder, FolderOpen, FolderTree, HardDrive, Home, LoaderCircle, Lock, RefreshCw, Search, X } from "lucide-react";
+import { ArrowUpRight, ChevronRight, Eye, EyeOff, File, Folder, FolderOpen, FolderTree, HardDrive, Home, LoaderCircle, Lock, Network, RefreshCw, Search, X } from "lucide-react";
 import { api } from "../api";
-import { collapseGraph, expandGraph, loadGraph, store, useStore } from "../store";
+import { buildNetwork, collapseGraph, expandGraph, loadGraph, store, useStore } from "../store";
+import { FullNetwork } from "./FullNetwork";
 import { ForceGraph, kindColor, type GNode, type GraphLayout } from "../components/ForceGraph";
 import { Empty, PageHead, Segmented } from "../components/ui";
 import { baseName, displayRoot, formatCount, formatSize, shortPath } from "../format";
@@ -152,6 +153,8 @@ export function FolderGraph() {
   }
   const entry = sel && scan ? scan.entries.find((e) => e.path.toLowerCase() === sel.path.toLowerCase() && e.status === "pending") : null;
 
+  if (graph.mode === "network") return <FullNetwork />;
+
   return (
     <div className="page page-wide">
       <PageHead
@@ -183,6 +186,10 @@ export function FolderGraph() {
             <button type="button" className="btn" onClick={pickRoot}>
               <FolderOpen />
               Choose folder
+            </button>
+            <button type="button" className="btn primary" title="Map every folder at once" onClick={() => info && buildNetwork(graph.root ?? info.home)}>
+              <Network />
+              Full network
             </button>
           </>
         }

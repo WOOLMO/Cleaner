@@ -36,6 +36,9 @@ let scanJob = null;
 let mapJob = null;
 let organizing = null; // the last organize plan; the window applies it by file id, never by path
 let graphRoot = null; // the folder graph only reads inside the folder it was opened on
+let lastThreat = engine.readThreatScan();
+let protectJob = null;
+let networkJob = null;
 
 // ---- validation: the window is treated as untrusted input ----
 const fail = (message) => {
@@ -145,7 +148,7 @@ export function registerIpc() {
 
   handle("system:openExternal", (event, url) => {
     // Only the project page and Google AI Studio, never arbitrary URLs.
-    if (/^https:\/\/(github\.com\/WOOLMO\/Cleaner|aistudio\.google\.com\/apikey)/.test(asString(url, "url"))) shell.openExternal(url);
+    if (/^https:\/\/(github\.com\/WOOLMO\/Cleaner|aistudio\.google\.com\/apikey|auth\.abuse\.ch\/?$|www\.virustotal\.com\/gui\/(my-apikey|file\/[a-f0-9]{64})$)/.test(asString(url, "url"))) shell.openExternal(url);
     return true;
   });
 
@@ -308,7 +311,7 @@ export function registerIpc() {
     const started = Date.now();
     try {
       const result = await engine.spaceMap(root, { signal: controller.signal, onProgress: (p) => emit({ type: "map", ...p }) });
-      mapTree = { root: result.root, sizes: result.sizes, kids: result.kids };
+      mapTree = { root: result.root, sizes: result.sizes, kids: result.kids, stats: result.stats };
       const minBytes = Math.min(512 * 1024 ** 2, Math.max(1024 ** 2, result.stats.bytes * 0.02));
       const units = engine.pickUnits(result, { minBytes, limit: 15 });
       let disk = null;
@@ -501,6 +504,184 @@ export function registerIpc() {
     if (!graphRoot || !engine.isInside(graphRoot, dir)) fail("outside the folder in the graph");
     if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return { children: [], error: "folder not found" };
     return engine.readLevel(dir, { flags: scanFlags() });
+  });
+
+  // The full network: every folder under a root, sized with the space map walk (reused when the
+  // space map of that root is still in memory) and trimmed to a drawable budget.
+  handle("graph:network", async (event, request) => {
+    if (networkJob) fail("the network is already being built");
+    const root = asFolder(request?.root ?? os.homedir());
+    let map = mapTree && mapTree.root.toLowerCase() === root.toLowerCase() ? mapTree : null;
+    if (!map) {
+      const win = BrowserWindow.fromWebContents(event.sender);
+      const emit = emitter(win, "graph:networkEvent");
+      const controller = new AbortController();
+      networkJob = controller;
+      try {
+        const result = await engine.spaceMap(root, { signal: controller.signal, onProgress: (p) => emit({ type: "map", ...p }) });
+        mapTree = { root: result.root, sizes: result.sizes, kids: result.kids, stats: result.stats };
+        map = mapTree;
+      } catch (err) {
+        if (controller.signal.aborted) return { ok: false, cancelled: true };
+        return { ok: false, error: err.message };
+      } finally {
+        networkJob = null;
+      }
+    }
+    graphRoot = root;
+    const network = engine.buildNetwork(map, { budget: 5000 });
+    log.info("folder network built", { root, nodes: network.nodes.length });
+    return { ok: true, network };
+  });
+  handle("graph:networkCancel", () => {
+    networkJob?.abort();
+    return true;
+  });
+
+  // ---- protection ----
+  let defenderCache = null;
+  const defender = async () => {
+    if (!defenderCache || Date.now() - defenderCache.at > 5 * 60_000) defenderCache = { at: Date.now(), value: await engine.defenderStatus() };
+    return defenderCache.value;
+  };
+  const protectStatus = async () => {
+    const { policy } = effectiveSettings();
+    return {
+      defender: await defender(),
+      keys: { malwareBazaar: keyStatus("malwareBazaar"), virusTotal: keyStatus("virusTotal") },
+      knownHashes: engine.loadBlocklist(policy.blocklistFile ? [policy.blocklistFile] : []).size,
+      quarantined: engine.listQuarantine().length,
+    };
+  };
+  handle("protect:status", () => protectStatus());
+  handle("protect:last", () => lastThreat);
+  handle("protect:cancel", () => {
+    protectJob?.abort();
+    return true;
+  });
+  handle("protect:start", async (event, request) => {
+    if (protectJob) fail("a threat scan is already running");
+    const mode = ["quick", "full", "custom"].includes(request?.mode) ? request.mode : "quick";
+    const roots = mode === "custom" ? (Array.isArray(request?.roots) ? request.roots : []).slice(0, 20).map(asFolder) : [];
+    if (mode === "custom" && !roots.length) fail("choose at least one folder");
+    const { settings, policy } = effectiveSettings();
+    const gemini = getKey("gemini").key;
+    // A policy that turns Gemini off also keeps file hashes on the machine.
+    const online = settings.aiEnabled;
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const emit = emitter(win, "protect:event");
+    const controller = new AbortController();
+    protectJob = controller;
+    log.info("threat scan started", { mode, roots });
+    try {
+      const result = await engine.runThreatScan({
+        mode,
+        roots,
+        desktop: app.getPath("desktop"),
+        ai: settings.aiEnabled && gemini ? { apiKey: gemini, models: engine.DEFAULTS.models } : null,
+        keys: online ? { malwareBazaar: getKey("malwareBazaar").key, virusTotal: getKey("virusTotal").key } : {},
+        blocklists: policy.blocklistFile ? [policy.blocklistFile] : [],
+        signal: controller.signal,
+        onEvent: emit,
+      });
+      lastThreat = { ...result, finishedAt: Date.now() };
+      engine.saveThreatScan(lastThreat);
+      engine.audit("threat-scan", { app: "desktop", mode, roots: result.roots, files: result.stats.inspected, threats: result.stats.threats, suspicious: result.stats.suspicious });
+      log.info("threat scan finished", { inspected: result.stats.inspected, threats: result.stats.threats, suspicious: result.stats.suspicious, ms: result.durationMs });
+      return { ok: true, scan: lastThreat };
+    } catch (err) {
+      if (controller.signal.aborted) return { ok: false, cancelled: true };
+      log.error("threat scan failed", err);
+      return { ok: false, error: err.message };
+    } finally {
+      protectJob = null;
+    }
+  });
+
+  // Files are quarantined by their number in the last threat scan, never by a path from the window.
+  const pickResults = (ids) => {
+    if (!lastThreat) fail("there is no threat scan");
+    const wanted = new Set((Array.isArray(ids) ? ids : []).filter(Number.isInteger));
+    return lastThreat.results.filter((r) => wanted.has(r.id));
+  };
+  handle("protect:quarantine", (event, ids) => {
+    const picked = pickResults(ids).filter((r) => r.status === "found");
+    const done = [];
+    const failed = [];
+    for (const r of picked) {
+      try {
+        engine.quarantineFile(r.path, { reason: r.detections[0]?.name ?? r.findings.find((f) => f.counted)?.label ?? null, sha256: r.sha256, severity: r.severity });
+        r.status = "quarantined";
+        done.push(r);
+      } catch (err) {
+        failed.push({ path: r.path, reason: err.message });
+      }
+    }
+    engine.saveThreatScan(lastThreat);
+    if (done.length) engine.audit("quarantine", { app: "desktop", items: done.map((r) => ({ path: r.path, size: r.size, result: r.severity })) });
+    return { done: done.length, failed, scan: lastThreat };
+  });
+  handle("protect:trust", (event, id) => {
+    const [r] = pickResults([id]);
+    if (!r?.sha256) fail("that file has no fingerprint to trust");
+    engine.trustHash(r.sha256, { path: r.path, name: r.name });
+    r.status = "trusted";
+    r.trusted = true;
+    engine.saveThreatScan(lastThreat);
+    engine.audit("settings", { app: "desktop", changed: [`trusted ${r.name}`] });
+    return lastThreat;
+  });
+  handle("protect:lookup", async (event, id) => {
+    const [r] = pickResults([id]);
+    if (!r?.sha256) fail("that file has no fingerprint to look up");
+    const { key } = getKey("virusTotal");
+    if (!key || !effectiveSettings().settings.aiEnabled) {
+      shell.openExternal(engine.virusTotalPage(r.sha256));
+      return { opened: true };
+    }
+    const result = await engine.virusTotal(r.sha256, key);
+    r.reputation = [...(r.reputation ?? []).filter((x) => x.source !== "virustotal"), result];
+    engine.saveThreatScan(lastThreat);
+    return { opened: false, result, scan: lastThreat };
+  });
+
+  handle("quarantine:list", () => engine.listQuarantine());
+  const knownQuarantine = (id) => {
+    const q = engine.listQuarantine().find((x) => x.id === id);
+    if (!q) fail("that file is not in quarantine");
+    return q;
+  };
+  handle("quarantine:restore", (event, id) => {
+    const q = knownQuarantine(asString(id, "id", 80));
+    engine.restoreQuarantined(q.id);
+    engine.audit("quarantine-restore", { app: "desktop", items: [{ path: q.original, size: q.size, result: "restored" }] });
+    if (lastThreat) {
+      for (const r of lastThreat.results) if (r.status === "quarantined" && r.path.toLowerCase() === q.original.toLowerCase()) r.status = "found";
+      engine.saveThreatScan(lastThreat);
+    }
+    return engine.listQuarantine();
+  });
+  handle("quarantine:delete", (event, id) => {
+    const q = knownQuarantine(asString(id, "id", 80));
+    engine.deleteQuarantined(q.id);
+    engine.audit("quarantine-delete", { app: "desktop", items: [{ path: q.original, size: q.size, result: "deleted" }] });
+    return engine.listQuarantine();
+  });
+
+  handle("keys:set", async (event, request) => {
+    const name = request?.name;
+    if (name !== "malwareBazaar" && name !== "virusTotal") fail("unknown service");
+    const value = asString(request?.key, "key", 300).trim();
+    if (!/^[A-Za-z0-9_-]{16,128}$/.test(value)) return { ok: false, message: "That does not look like an API key." };
+    saveKey(value, name);
+    engine.audit("settings", { app: "desktop", changed: [`${name} key`] });
+    return { ok: true, status: await protectStatus() };
+  });
+  handle("keys:clear", async (event, name) => {
+    if (name !== "malwareBazaar" && name !== "virusTotal") fail("unknown service");
+    clearKey(name);
+    engine.audit("settings", { app: "desktop", changed: [`${name} key removed`] });
+    return protectStatus();
   });
 
   // ---- activity ----

@@ -37,6 +37,8 @@ export function loadPolicy() {
     allowPermanentDelete: bool(raw.allowPermanentDelete),
     maxAiItems: Number.isInteger(raw.maxAiItems) && raw.maxAiItems >= 0 ? raw.maxAiItems : undefined,
     excludePaths: Array.isArray(raw.excludePaths) ? raw.excludePaths.filter((p) => typeof p === "string") : [],
+    // a file of SHA-256 hashes (one per line, optional name after it) the threat scan treats as known malware
+    blocklistFile: typeof raw.blocklistFile === "string" ? raw.blocklistFile : null,
     error: null,
     source: POLICY_FILE,
   };

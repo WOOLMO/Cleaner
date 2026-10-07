@@ -214,3 +214,33 @@ test("the folder graph reads one level at a time and folds the rest", async () =
   assert.equal(level.children.find((n) => n.name === "z.txt").hidden, undefined);
   assert.equal(level.children.filter((n) => n.kind === "file")[0].name, "z.txt", "hidden files go last even when bigger");
 });
+
+test("the full network keeps the biggest branches within its budget", async () => {
+  const { buildNetwork } = await import("../src/network.js");
+  const root = "C:\\r";
+  const sizes = new Map([[root, 1000]]);
+  const kids = new Map([[root, []]]);
+  for (let i = 0; i < 10; i++) {
+    const dir = `${root}\\d${i}`;
+    sizes.set(dir, (i + 1) * 10);
+    kids.get(root).push(dir);
+    kids.set(dir, []);
+    for (let j = 0; j < 5; j++) {
+      const sub = `${dir}\\s${j}`;
+      sizes.set(sub, i + j);
+      kids.get(dir).push(sub);
+    }
+  }
+  const all = buildNetwork({ root, sizes, kids, stats: { dirs: 61, files: 0, bytes: 1000 } }, { budget: 1000 });
+  assert.equal(all.nodes.length, 61);
+  assert.equal(all.nodes[1].name, "d9", "biggest first");
+  const small = buildNetwork({ root, sizes, kids }, { budget: 20, perFolder: 6 });
+  assert.ok(small.nodes.length <= 20);
+  const more = small.nodes.find((n) => n.more);
+  assert.equal(more.parent, 0);
+  assert.equal(more.more, 4);
+  assert.equal(more.size, 10 + 20 + 30 + 40);
+  const opened = new Set(small.nodes.filter((n) => n.depth === 2).map((n) => small.nodes[n.parent].name));
+  assert.deepEqual([...opened].sort(), ["d7", "d8", "d9"], "the budget goes to the biggest branches first");
+  assert.ok(small.nodes.some((n) => n.more && small.nodes[n.parent].name === "d7"), "the branch that ran out of room folds the rest");
+});

@@ -12,7 +12,9 @@ const DEMO = process.argv.includes("--demo") || process.env.CLEANER_DEMO === "1"
 const CAPTURE_DIR = process.env.CLEANER_CAPTURE_DIR;
 
 app.setAppUserModelId("io.github.woolmo.cleaner");
-if (!app.requestSingleInstanceLock()) app.quit();
+// Screenshot mode runs beside a real window: its own browser profile, and no single-instance lock.
+if (CAPTURE_DIR) app.setPath("userData", path.join(app.getPath("temp"), "cleaner-capture-profile"));
+else if (!app.requestSingleInstanceLock()) app.quit();
 
 const DARK = { bg: "#0b0e0c", symbols: "#c3ccc6" };
 const LIGHT = { bg: "#f4f6f4", symbols: "#2b322e" };
@@ -67,7 +69,7 @@ function createWindow() {
 // Screenshot mode for the README: visits each page and saves a PNG. Used with --demo, so no real data appears.
 async function capture() {
   // "page" or "page:ms" to wait longer before the shot
-  const pages = (process.env.CLEANER_CAPTURE_PAGES ?? "overview,scan,results,detail,confirm,organize,organize-plan:2400,map,graph:2600,graph-open:3600,holding,activity,settings,palette,running").split(",");
+  const pages = (process.env.CLEANER_CAPTURE_PAGES ?? "overview,scan,results,detail,confirm,protect,protect-detail,protect-startup,organize,organize-plan:2400,map,graph:2600,graph-open:3600,network:3200,holding,activity,settings,palette,running").split(",");
   fs.mkdirSync(CAPTURE_DIR, { recursive: true });
   win.setContentSize(1360, 860);
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));

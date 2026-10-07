@@ -118,6 +118,9 @@ export interface AuditEntry {
   classifiedBy?: string;
   items?: { path: string; size: number; result?: string; to?: string }[];
   run?: string;
+  mode?: string;
+  threats?: number;
+  suspicious?: number;
 }
 
 export interface Policy {
@@ -258,6 +261,146 @@ export interface GraphNode {
   children?: GraphNode[];
 }
 
+export type Severity = "threat" | "suspicious" | "notice";
+
+export interface KeyStatus {
+  hasKey: boolean;
+  source: "secure" | "cli" | null;
+  hint: string | null;
+}
+
+export interface ThreatFinding {
+  id: string;
+  weight: number;
+  label: string;
+  detail: string | null;
+  counted: boolean;
+}
+
+export interface Signer {
+  status: "valid" | "invalid" | "untrusted" | "none" | "unknown";
+  subject: string | null;
+  os?: boolean;
+}
+
+export interface Reputation {
+  source: "malwarebazaar" | "virustotal";
+  found: boolean;
+  label?: string | null;
+  malicious?: number;
+  suspicious?: number;
+  total?: number;
+}
+
+export interface StartupRef {
+  id: number;
+  source: "registry" | "startup-folder" | "task" | "service" | "winlogon" | "debugger" | "wmi";
+  location: string;
+  name: string;
+  command: string;
+  target: string | null;
+  missing: boolean;
+  publisher: string | null;
+  lolbin: string | null;
+}
+
+export interface StartupEntry extends StartupRef {
+  signer: Signer | null;
+  severity: Severity | "clean" | "missing";
+  reasons: string[];
+}
+
+export interface ThreatResult {
+  id: number;
+  path: string;
+  name: string;
+  size: number;
+  mtime: number;
+  kind: string;
+  sha256: string | null;
+  severity: Severity;
+  score: number;
+  findings: ThreatFinding[];
+  detections: { source: "hash" | "defender" | "malwarebazaar" | "virustotal"; name: string }[];
+  signer: Signer | null;
+  zone: { id: number; url: string | null } | null;
+  autostart: StartupRef | null;
+  ai: { verdict: "likely-benign" | "unclear" | "likely-malicious"; confidence: number; reason: string } | null;
+  reputation: Reputation[];
+  trusted: boolean;
+  status: "found" | "quarantined" | "trusted" | "failed";
+}
+
+export interface ThreatScan {
+  mode: "quick" | "full" | "custom";
+  roots: string[];
+  startedAt: number;
+  durationMs: number;
+  finishedAt: number;
+  stats: { filesSeen: number; inspected: number; programs: number; signed: number; startups: number; threats: number; suspicious: number; notices: number };
+  engines: {
+    rules: boolean;
+    hashList: boolean;
+    defender: boolean | null;
+    malwareBazaar: boolean;
+    virusTotal: boolean;
+    gemini: boolean;
+    defenderReason: string | null;
+    model: string | null;
+    aiError: string | null;
+  };
+  results: ThreatResult[];
+  startups: StartupEntry[];
+  errors: string[];
+}
+
+export interface ProtectStatus {
+  defender: { available: boolean; mode?: string; engine?: string; updated?: string | null; reason?: string | null };
+  keys: { malwareBazaar: KeyStatus; virusTotal: KeyStatus };
+  knownHashes: number;
+  quarantined: number;
+}
+
+export interface Quarantined {
+  id: string;
+  original: string;
+  size: number;
+  sha256: string | null;
+  reason: string | null;
+  severity: Severity | null;
+  time: string;
+}
+
+export type ThreatEvent =
+  | { type: "phase"; phase: "autostart" | "walk" | "inspect" | "signatures" | "defender" | "reputation" | "ai" }
+  | { type: "autostart"; count: number }
+  | { type: "walk"; files: number; candidates: number; current: string }
+  | { type: "walked"; files: number; candidates: number }
+  | { type: "inspect"; done: number; total: number; current: string }
+  | { type: "signatures"; checked: number }
+  | { type: "defender" | "reputation" | "ai"; done: number; total: number };
+
+export type ServiceName = "malwareBazaar" | "virusTotal";
+
+export interface NetNode {
+  id: number;
+  parent: number;
+  path: string;
+  name: string;
+  size: number;
+  depth: number;
+  sub: number;
+  open: boolean;
+  more?: number;
+}
+
+export interface FolderNetwork {
+  root: string;
+  nodes: NetNode[];
+  total: { dirs: number; files: number; bytes: number; unreadable: number };
+  shown: number;
+}
+
 export interface CleanerApi {
   info(): Promise<AppInfo>;
   drives(): Promise<Drive[]>;
@@ -296,6 +439,22 @@ export interface CleanerApi {
   undoOrganize(id: string): Promise<{ restored: number; skipped: number; run: OrganizeRun }>;
   graphLoad(request: { root: string }): Promise<{ ok: true; tree: GraphNode }>;
   graphExpand(path: string): Promise<{ children: GraphNode[]; error?: string }>;
+  graphNetwork(request: { root: string }): Promise<{ ok: true; network: FolderNetwork } | { ok: false; cancelled?: boolean; error?: string }>;
+  graphNetworkCancel(): Promise<boolean>;
+  onNetworkEvent(fn: (ev: { type: "map"; files: number; bytes: number; current: string }) => void): () => void;
+  protectStatus(): Promise<ProtectStatus>;
+  lastThreatScan(): Promise<ThreatScan | null>;
+  startThreatScan(request: { mode: ThreatScan["mode"]; roots?: string[] }): Promise<{ ok: true; scan: ThreatScan } | { ok: false; cancelled?: boolean; error?: string }>;
+  cancelThreatScan(): Promise<boolean>;
+  onThreatEvent(fn: (ev: ThreatEvent) => void): () => void;
+  quarantineItems(ids: number[]): Promise<{ done: number; failed: { path: string; reason: string }[]; scan: ThreatScan }>;
+  trustItem(id: number): Promise<ThreatScan>;
+  lookupItem(id: number): Promise<{ opened: true } | { opened: false; result: Reputation; scan: ThreatScan }>;
+  listQuarantine(): Promise<Quarantined[]>;
+  restoreQuarantine(id: string): Promise<Quarantined[]>;
+  deleteQuarantine(id: string): Promise<Quarantined[]>;
+  setServiceKey(request: { name: ServiceName; key: string }): Promise<{ ok: true; status: ProtectStatus } | { ok: false; message: string }>;
+  clearServiceKey(name: ServiceName): Promise<ProtectStatus>;
 }
 
 export interface WindowApi {

@@ -1,7 +1,7 @@
 {
   "name": "cleaner-desktop",
   "productName": "Cleaner",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Find the junk eating your Windows drive, let Gemini double-check it, and remove only what you approve.",
   "type": "module",
   "main": "main/main.js",
@@ -41,7 +41,7 @@
     "productName": "Cleaner",
     "copyright": "Copyright © 2026 WOOLMO",
     "directories": {
-      "output": "release",
+      "output": "release/${version}",
       "buildResources": "build"
     },
     "files": [
@@ -57,7 +57,7 @@
         "nsis",
         "zip"
       ],
-      "icon": "build/icon.png",
+      "icon": "build/icon.ico",
       "artifactName": "Cleaner-${version}-win-x64.${ext}"
     },
     "nsis": {

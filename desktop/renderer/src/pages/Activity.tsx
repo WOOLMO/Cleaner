@@ -6,11 +6,12 @@ import { Empty, PageHead, Segmented } from "../components/ui";
 import { ActionIcon, actionLabel, describe } from "../components/activity";
 import { baseName, dirName, formatSize, shortPath, timeAgo } from "../format";
 
-type Filter = "all" | "removals" | "holds" | "organize" | "scans" | "settings";
+type Filter = "all" | "removals" | "holds" | "protect" | "organize" | "scans" | "settings";
 const MATCH: Record<Filter, (a: string) => boolean> = {
   all: () => true,
   removals: (a) => a === "delete" || a === "purge",
   holds: (a) => a === "hold" || a === "restore",
+  protect: (a) => a === "threat-scan" || a.startsWith("quarantine"),
   organize: (a) => a === "organize" || a === "organize-undo",
   scans: (a) => a === "scan" || a === "map",
   settings: (a) => a === "settings" || a === "export",
@@ -56,6 +57,7 @@ export function Activity() {
             { value: "all", label: "All", count: count("all") },
             { value: "removals", label: "Removals", count: count("removals") },
             { value: "holds", label: "Hold and restore", count: count("holds") },
+            { value: "protect", label: "Protection", count: count("protect") },
             { value: "organize", label: "Organize", count: count("organize") },
             { value: "scans", label: "Scans", count: count("scans") },
             { value: "settings", label: "Settings and exports", count: count("settings") },

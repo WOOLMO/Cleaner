@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Archive, Download, FileText, FolderTree, Gauge, History, LayoutGrid, Moon, Play, ScanSearch, Search, Settings, Sun, Wand2 } from "lucide-react";
+import { Archive, Download, FileText, FolderTree, Gauge, History, LayoutGrid, Moon, Play, Radar, ScanSearch, Search, Settings, ShieldCheck, Sun, Wand2 } from "lucide-react";
 import { api } from "../api";
-import { go, loadGraph, planOrganize, saveSettings, startMap, startScan, store, toast, useStore } from "../store";
+import { go, loadGraph, planOrganize, saveSettings, startMap, startScan, startThreatScan, store, toast, useStore } from "../store";
 
 interface Command {
   id: string;
@@ -24,10 +24,13 @@ export function Palette() {
     const list: Command[] = [
       { id: "scan-home", label: "Scan my user folder", hint: "Scan", icon: <Play />, run: () => info && startScan([info.home]) },
       { id: "map-c", label: "Map drive C:", hint: "Space map", icon: <LayoutGrid />, run: () => startMap("C:\\") },
+      { id: "threat-quick", label: "Quick threat scan", hint: "Protection", icon: <Radar />, run: () => startThreatScan("quick") },
+      { id: "threat-full", label: "Full threat scan of my user folder", hint: "Protection", icon: <ShieldCheck />, run: () => startThreatScan("full") },
       { id: "organize-desktop", label: "Organize my Desktop", hint: "Organize", icon: <Wand2 />, run: () => { go("organize"); api.organizePlaces().then((p) => { const d = p.find((x) => x.id === "desktop"); if (d) planOrganize(d.path); }); } },
       { id: "graph-home", label: "Graph my user folder", hint: "Folder graph", icon: <FolderTree />, run: () => { go("graph"); if (info) loadGraph(info.home); } },
       { id: "overview", label: "Go to Overview", icon: <Gauge />, run: () => go("overview") },
       { id: "scan", label: "Go to Scan", icon: <ScanSearch />, run: () => go("scan") },
+      { id: "protect", label: "Go to Protection", icon: <ShieldCheck />, run: () => go("protect") },
       { id: "organize", label: "Go to Organize", icon: <Wand2 />, run: () => go("organize") },
       { id: "map", label: "Go to Space map", icon: <LayoutGrid />, run: () => go("map") },
       { id: "graph", label: "Go to Folder graph", icon: <FolderTree />, run: () => go("graph") },

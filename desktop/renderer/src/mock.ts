@@ -3,6 +3,8 @@ import type {
   AppInfo, AuditEntry, CleanerApi, Drive, Entry, Explanation, Held, MapChildren, MapResult, ScanEvent, ScanResult, SettingsView,
 } from "./types";
 import { extraMock } from "./mock-extra";
+import { protectMock } from "./mock-protect";
+import { networkMock } from "./mock-network";
 
 const GB = 1024 ** 3;
 const MB = 1024 ** 2;
@@ -158,7 +160,7 @@ const SAMPLE_PATHS = [
 
 export const mockApi: CleanerApi = {
   async info(): Promise<AppInfo> {
-    return { version: "1.1.0", engineVersion: "1.1.0", electron: "44.6.0", dataDir: `${HOME}\\AppData\\Local\\cleaner`, auditFile: `${HOME}\\AppData\\Local\\cleaner\\audit.jsonl`, policyFile: "C:\\ProgramData\\Cleaner\\policy.json", logFile: `${HOME}\\AppData\\Local\\cleaner\\logs\\desktop.log`, user: "alex", machine: "ALEX-PC", home: HOME };
+    return { version: "1.2.0", engineVersion: "1.2.0", electron: "44.6.0", dataDir: `${HOME}\\AppData\\Local\\cleaner`, auditFile: `${HOME}\\AppData\\Local\\cleaner\\audit.jsonl`, policyFile: "C:\\ProgramData\\Cleaner\\policy.json", logFile: `${HOME}\\AppData\\Local\\cleaner\\logs\\desktop.log`, user: "alex", machine: "ALEX-PC", home: HOME };
   },
   async drives(): Promise<Drive[]> {
     return [
@@ -299,4 +301,6 @@ export const mockApi: CleanerApi = {
     return { ok: true, file: `${HOME}\\Documents\\cleaner-activity.csv` };
   },
   ...extraMock,
+  ...protectMock,
+  ...networkMock,
 };

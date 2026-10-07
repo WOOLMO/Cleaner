@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { boot, go, loadGraph, planOrganize, startScan, store, useStore, type Page } from "./store";
+import { boot, buildNetwork, go, loadGraph, planOrganize, setProtect, startScan, startThreatScan, store, useStore, type Page } from "./store";
 import { TitleBar, Rail } from "./components/Shell";
 import { Palette } from "./components/Palette";
 import { BrandMark, Toasts } from "./components/ui";
@@ -7,6 +7,7 @@ import { Overview } from "./pages/Overview";
 import { ScanPage } from "./pages/Scan";
 import { SpaceMap } from "./pages/SpaceMap";
 import { Organize } from "./pages/Organize";
+import { Protection } from "./pages/Protection";
 import { FolderGraph } from "./pages/FolderGraph";
 import { Holding } from "./pages/Holding";
 import { Activity } from "./pages/Activity";
@@ -15,6 +16,7 @@ import { SettingsPage } from "./pages/Settings";
 const PAGES: Record<Page, () => React.JSX.Element | null> = {
   overview: Overview,
   scan: ScanPage,
+  protect: Protection,
   organize: Organize,
   map: SpaceMap,
   graph: FolderGraph,
@@ -22,7 +24,7 @@ const PAGES: Record<Page, () => React.JSX.Element | null> = {
   activity: Activity,
   settings: SettingsPage,
 };
-const ORDER: Page[] = ["overview", "scan", "organize", "map", "graph", "holding", "activity", "settings"];
+const ORDER: Page[] = ["overview", "scan", "protect", "organize", "map", "graph", "holding", "activity", "settings"];
 
 function useTheme() {
   const theme = useStore((s) => s.settings?.settings.theme ?? "system");
@@ -46,7 +48,7 @@ function useShortcuts() {
       if (e.ctrlKey && e.key.toLowerCase() === "k") {
         e.preventDefault();
         store.set((s) => ({ palette: !s.palette }));
-      } else if (e.ctrlKey && /^[1-8]$/.test(e.key)) {
+      } else if (e.ctrlKey && /^[1-9]$/.test(e.key)) {
         e.preventDefault();
         go(ORDER[Number(e.key) - 1]);
       }
@@ -80,7 +82,18 @@ function useCaptureNavigation() {
           store.set({ page: "graph" });
           if (store.get().graph.tree) send();
           else if (home) loadGraph(home).then(() => setTimeout(send, 50));
-        } else if (target === "palette") store.set({ palette: true });
+        } else if (target === "network" || target === "network-drive") {
+          store.set({ page: "graph" });
+          const home = store.get().info?.home;
+          if (home) buildNetwork(target === "network" ? home : "C:\\");
+        } else if (target === "protect-detail") {
+          store.set({ page: "protect" });
+          setProtect({ tab: "findings", focus: 3 });
+        } else if (target === "protect-startup") {
+          store.set({ page: "protect" });
+          setProtect({ tab: "startup", focus: null });
+        } else if (target === "protect-running") startThreatScan("quick");
+        else if (target === "palette") store.set({ palette: true });
         else go(target as Page);
       }),
     [],
