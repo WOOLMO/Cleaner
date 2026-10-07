@@ -46,13 +46,18 @@ export async function readDir(dir, { light = false } = {}) {
 // Walks folder trees with many folders in flight. On Windows this is about 5x faster than one folder at a time,
 // because file metadata calls run in parallel on libuv's thread pool.
 // visit(job, listing) returns the jobs to walk next. listing is null when a folder can't be read.
-export function walk(jobs, visit, { concurrency = 48, light = false } = {}) {
+export function walk(jobs, visit, { concurrency = 48, light = false, signal } = {}) {
   const queue = [...jobs];
   let active = 0;
   let failed = false;
   return new Promise((resolve, reject) => {
     const pump = () => {
       if (failed) return;
+      if (signal?.aborted) {
+        failed = true;
+        reject(signal.reason);
+        return;
+      }
       if (!queue.length && !active) {
         resolve();
         return;
@@ -80,7 +85,7 @@ export function walk(jobs, visit, { concurrency = 48, light = false } = {}) {
 }
 
 // Adds up a whole folder without classifying anything inside it.
-export async function treeSize(dir, { concurrency = 32 } = {}) {
+export async function treeSize(dir, { concurrency = 32, signal } = {}) {
   let size = 0;
   let files = 0;
   let newest = 0;
@@ -94,6 +99,6 @@ export async function treeSize(dir, { concurrency = 32 } = {}) {
     files += listing.count;
     if (listing.newest > newest) newest = listing.newest;
     return listing.dirs.map((d) => ({ dir: d.path }));
-  }, { concurrency, light: true });
+  }, { concurrency, light: true, signal });
   return { size, files, newest, unreadable };
 }

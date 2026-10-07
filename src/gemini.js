@@ -90,9 +90,10 @@ function networkError(err) {
 }
 
 export class Gemini {
-  constructor({ apiKey, models, minIntervalMs = 4000, retryBaseMs = 1500, fetchImpl = globalThis.fetch, sleep = realSleep }) {
+  constructor({ apiKey, models, minIntervalMs = 4000, retryBaseMs = 1500, fetchImpl = globalThis.fetch, sleep = realSleep, signal }) {
     this.apiKey = apiKey;
     this.models = models;
+    this.signal = signal;
     this.index = 0;
     this.minIntervalMs = minIntervalMs;
     this.retryBaseMs = retryBaseMs;
@@ -117,18 +118,21 @@ export class Gemini {
     let lastError = "no answer";
     const attempts = 3 * this.models.length + 2;
     for (let attempt = 1; attempt <= attempts; attempt++) {
+      this.signal?.throwIfAborted();
       await this.pace();
       const model = this.model;
       let res, data;
       try {
+        const timeout = AbortSignal.timeout(120_000);
         res = await this.fetch(`${API}/${model}:generateContent`, {
           method: "POST",
           headers: { "content-type": "application/json", "x-goog-api-key": this.apiKey },
           body: JSON.stringify(body),
-          signal: AbortSignal.timeout(120_000),
+          signal: this.signal ? AbortSignal.any([timeout, this.signal]) : timeout,
         });
         data = await res.json().catch(() => ({}));
       } catch (err) {
+        if (this.signal?.aborted) throw this.signal.reason;
         lastError = networkError(err);
         await this.sleep(Math.min(30_000, this.retryBaseMs * attempt));
         continue;
@@ -207,14 +211,16 @@ function toPrompt(item) {
 }
 
 // Sends items in batches. On a hard failure it returns what it has so far plus the error.
-export async function classifyItems(items, { gemini, batchSize, onProgress }) {
+export async function classifyItems(items, { gemini, batchSize, onProgress, signal }) {
   const results = new Map();
   for (let i = 0; i < items.length; i += batchSize) {
+    signal?.throwIfAborted();
     const batch = items.slice(i, i + batchSize);
     try {
       const out = await gemini.generate(request(CLASSIFY_PROMPT, CLASSIFY_SCHEMA, "Classify these items:\n" + JSON.stringify(batch.map(toPrompt))));
       for (const r of out.results ?? []) if (Number.isInteger(r.id)) results.set(r.id, r);
     } catch (error) {
+      if (signal?.aborted) throw error;
       return { results, error };
     }
     onProgress?.(Math.min(i + batchSize, items.length), items.length);

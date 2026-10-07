@@ -20,3 +20,22 @@ jobs:
         run: |
           node bin/cleaner.js --version
           node bin/cleaner.js --help
+
+  desktop:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+      - run: node scripts/sync-core.mjs
+      - run: npm run typecheck
+      - run: npm run build:ui

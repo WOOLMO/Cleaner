@@ -193,13 +193,14 @@ async function partialHash(file, size) {
   }
 }
 
-async function fullHash(file, onBytes) {
+async function fullHash(file, onBytes, signal) {
   const fh = await fsp.open(file, "r");
   const buf = Buffer.alloc(4 * MB);
   const hash = crypto.createHash("sha1");
   try {
     let pos = 0;
     for (;;) {
+      signal?.throwIfAborted();
       const { bytesRead } = await fh.read(buf, 0, buf.length, pos);
       if (!bytesRead) break;
       hash.update(buf.subarray(0, bytesRead));
@@ -212,13 +213,14 @@ async function fullHash(file, onBytes) {
   }
 }
 
-async function groupBy(list, key) {
+async function groupBy(list, key, signal) {
   const groups = new Map();
   for (const item of list) {
     let k;
     try {
       k = await key(item);
-    } catch {
+    } catch (err) {
+      if (signal?.aborted) throw err;
       continue;
     }
     if (!groups.has(k)) groups.set(k, []);
@@ -243,6 +245,8 @@ export async function scan(roots, opts = {}) {
   const largeBytes = (opts.largeFileMB ?? 200) * MB;
   const dupeMin = (opts.dupeMinMB ?? 1) * MB;
   const exclude = opts.exclude ?? [];
+  const excludeTest = opts.excludeTest ?? (() => false);
+  const signal = opts.signal;
   const report = opts.onProgress ?? (() => {});
   const now = Date.now();
   // The folders you asked to scan and your home folder are never treated as one big project or app.
@@ -260,7 +264,7 @@ export async function scan(roots, opts = {}) {
   const add = (item) => items.set(item.path.toLowerCase(), item);
 
   const addTree = async (p, rule) => {
-    const t = await treeSize(p);
+    const t = await treeSize(p, { signal });
     stats.files += t.files;
     stats.bytes += t.size;
     stats.errors += t.unreadable;
@@ -306,7 +310,7 @@ export async function scan(roots, opts = {}) {
       const lower = d.path.toLowerCase();
       if (NEVER_ENTER.has(nameL)) continue;
       if (isDriveRoot && ROOT_SKIP.has(nameL)) continue;
-      if (exclude.some((x) => lower === x || lower.startsWith(x + "\\"))) continue;
+      if (exclude.some((x) => lower === x || lower.startsWith(x + "\\")) || excludeTest(d.path)) continue;
       let rule = dirRule(d.path, nameL, lower, fileNames, lowerDir);
       if (!rule && oldVersions.has(d.name)) {
         rule = { category: "old-app-version", verdict: "review", reason: `Older app version, the newest one is ${oldVersions.get(d.name)}` };
@@ -333,7 +337,7 @@ export async function scan(roots, opts = {}) {
     await Promise.all(trees);
     throttled({ type: "walk", files: stats.files, bytes: stats.bytes, current });
     return next;
-  });
+  }, { signal });
 
   report({ type: "walked", files: stats.files, bytes: stats.bytes, dirs: stats.dirs, errors: stats.errors, ms: Date.now() - now });
 
@@ -343,12 +347,13 @@ export async function scan(roots, opts = {}) {
   const toHash = sameSize.reduce((sum, [size, copies]) => sum + size * copies.length, 0);
   let hashed = 0;
   for (const [size, copies] of sameSize) {
-    for (const partial of (await groupBy(copies, (x) => partialHash(x.p, size))).values()) {
+    signal?.throwIfAborted();
+    for (const partial of (await groupBy(copies, (x) => partialHash(x.p, size), signal)).values()) {
       if (partial.length < 2) continue;
       const full = size <= 131072 ? [partial] : [...(await groupBy(partial, (x) => fullHash(x.p, (n) => {
         hashed += n;
         throttled({ type: "hash", done: hashed, total: toHash });
-      }))).values()];
+      }, signal), signal)).values()];
       for (const same of full) {
         if (same.length < 2 || same.every((x) => x.contained)) continue;
         const inside = same.filter((x) => x.contained);
@@ -367,5 +372,6 @@ export async function scan(roots, opts = {}) {
     }
   }
 
+  report({ type: "hashed", copies: [...items.values()].filter((i) => i.category === "duplicate").length, bytes: hashed });
   return { items: [...items.values()], stats };
 }

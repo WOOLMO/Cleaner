@@ -21,7 +21,7 @@ const CONTAINERS = [
 ];
 
 // Sizes every folder under root. Totals are kept for folders up to maxDepth deep; deeper folders count toward them.
-export async function spaceMap(root, { maxDepth = 7, onProgress } = {}) {
+export async function spaceMap(root, { maxDepth = 7, onProgress, signal } = {}) {
   root = path.resolve(root);
   const sizes = new Map([[root, 0]]);
   const kids = new Map();
@@ -58,7 +58,7 @@ export async function spaceMap(root, { maxDepth = 7, onProgress } = {}) {
       onProgress({ files: stats.files, bytes: stats.bytes, current: dir });
     }
     return next;
-  }, { light: true });
+  }, { light: true, signal });
 
   return { root, sizes, kids, stats };
 }

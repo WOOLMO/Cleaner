@@ -2,23 +2,24 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { loadEnv, saveSetting, migrateOldDb, DEFAULTS, DATA_DIR, ENV_FILES, ROOT } from "./config.js";
-import { scan } from "./scan.js";
+import { runScanPipeline } from "./pipeline.js";
 import { spaceMap, pickUnits } from "./map.js";
-import { inspectFile } from "./inspect.js";
-import { Gemini, classifyItems, explainFolders } from "./gemini.js";
-import { decide } from "./decide.js";
+import { Gemini, explainFolders } from "./gemini.js";
 import { makeHeader, writeDb, readDb } from "./db.js";
+import { loadPolicy, isExcludedByPolicy } from "./policy.js";
+import { audit } from "./audit.js";
 import { isSafeToRemove, removePermanently, freeBytes } from "./remove.js";
 import { holdItems, listHeld, restoreHeld, purgeHeld, HOLD_DIR } from "./hold.js";
 import { writeRemovalScript, desktopDir } from "./script.js";
 import { askKey, askLine, closeInput } from "./input.js";
+import { analyzeFolder, rulePlan, aiPlan, applyPlan, undoOrganize, listJournals, organizeBlocked, LANGUAGE_NAMES } from "./organize.js";
 import {
   c, banner, logLine, Task, box, bar, rule, verdictTag, columns, detailRoom,
   formatSize, shortPath, truncateMiddle, truncateEnd,
 } from "./ui.js";
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
-const COMMANDS = ["scan", "map", "clean", "list", "export", "restore", "purge", "setup", "help"];
+const COMMANDS = ["scan", "map", "organize", "clean", "list", "export", "restore", "purge", "setup", "help"];
 const sum = (list) => list.reduce((total, e) => total + e.size, 0);
 const seconds = (ms) => `${(ms / 1000).toFixed(1)}s`;
 
@@ -42,6 +43,7 @@ function parseArgs(argv) {
       case "--no-content": opts.noContent = true; break;
       case "--dry-run": opts.dryRun = true; break;
       case "--hold": opts.hold = true; break;
+      case "--undo": opts.undo = true; break;
       case "--db": opts.db = path.resolve(value()); break;
       case "--out": opts.out = path.resolve(value()); break;
       case "--model": opts.model = value(); break;
@@ -65,6 +67,8 @@ function help() {
   rule("commands");
   line("cleaner scan [folders...]", "find junk (default: your user folder), then y/N");
   line("cleaner map [folder]", "the biggest folders on the drive, explained");
+  line("cleaner organize [folder]", "tidy loose files into folders, your way (default: Desktop)");
+  line("cleaner organize --undo", "put the last organize run back");
   line("cleaner clean", "pick items from the last scan and remove them");
   line("cleaner list", "show the last scan");
   line("cleaner export", "write the removal script from the last scan");
@@ -83,10 +87,22 @@ function help() {
   line("--model <name>", "try this gemini model first");
   line("--db <file>", "database file");
   line("--out <dir>", "where the removal script goes (default: your Desktop)");
-  line("--dry-run", "with clean: list, remove nothing");
+  line("--dry-run", "with clean or organize: show the plan, change nothing");
   console.log();
   console.log(`  ${c.gray("data folder")}  ${c.dim(shortPath(DATA_DIR))}`);
   console.log();
+}
+
+// Organization policy wins over command-line options.
+let policy = null;
+function applyPolicy(opts) {
+  policy = loadPolicy();
+  if (!policy.managed) return;
+  logLine(policy.error ? "warn" : "info", "policy", policy.error ?? `managed by ${policy.organization ?? "your organization"}`);
+  if (policy.aiEnabled === false) opts.policyNoAi = true;
+  if (policy.allowPreviews === false) opts.noContent = true;
+  if (policy.allowPermanentDelete === false) opts.hold = true;
+  if (policy.maxAiItems !== undefined) opts.maxAi = Math.min(opts.maxAi ?? DEFAULTS.maxAi, policy.maxAiItems);
 }
 
 function geminiSetup(opts) {
@@ -94,8 +110,9 @@ function geminiSetup(opts) {
   const models = opts.model
     ? [opts.model, ...DEFAULTS.models.filter((m) => m !== opts.model)]
     : (process.env.GEMINI_MODELS?.split(",").map((s) => s.trim()).filter(Boolean) ?? DEFAULTS.models);
-  const useAi = !opts.offline && Boolean(apiKey) && opts.maxAi !== 0;
-  if (opts.offline) logLine("skip", "gemini", "--offline, local rules only");
+  const useAi = !opts.offline && !opts.policyNoAi && Boolean(apiKey) && opts.maxAi !== 0;
+  if (opts.policyNoAi) logLine("skip", "gemini", "turned off by policy, local rules only");
+  else if (opts.offline) logLine("skip", "gemini", "--offline, local rules only");
   else if (!apiKey) logLine("warn", "gemini", "no API key yet, run cleaner setup (local rules for now)");
   else if (opts.maxAi === 0) logLine("skip", "gemini", "--max-ai 0, local rules only");
   else logLine("ok", "gemini", `key loaded, ${models[0]}${models.length > 1 ? ` + ${models.length - 1} fallbacks` : ""}`);
@@ -140,6 +157,7 @@ async function removeEntries(selected, { header, entries, dbFile, hold }) {
   if (hold) {
     const task = new Task("moving to hold");
     const { held } = holdItems(selected);
+    audit("hold", { items: selected });
     const failed = selected.filter((e) => e.status === "failed");
     task.done(`${held} of ${selected.length} items held`, failed.length ? "warn" : "ok");
     for (const e of failed) logLine("fail", "not moved", `${shortPath(e.path)} (${e.note ?? "error"})`);
@@ -158,6 +176,7 @@ async function removeEntries(selected, { header, entries, dbFile, hold }) {
     e.status = removePermanently(e.path) ? "removed" : "failed";
     if (e.status === "removed") removed++;
   }
+  audit("delete", { items: selected });
   const failed = selected.filter((e) => e.status === "failed");
   task.done(`${removed} of ${selected.length} items removed`, failed.length ? "warn" : "ok");
   for (const e of failed) logLine("fail", "still there", `${shortPath(e.path)} (in use or needs admin rights)`);
@@ -185,91 +204,64 @@ async function runScan(args, opts) {
   const dbFile = opts.db ?? DEFAULTS.db;
 
   banner(VERSION);
+  applyPolicy(opts);
   const { useAi, apiKey, models } = geminiSetup(opts);
   if (useAi) logLine("info", "privacy", opts.noContent ? "names, sizes and dates go to gemini" : "names, sizes, dates and masked previews go to gemini");
   if (opts.hold) logLine("info", "mode", "hold: y moves items aside, nothing is deleted");
   for (const r of roots) logLine("ok", "target", shortPath(r));
   console.log();
 
-  // 1. walk + duplicates
-  const started = Date.now();
-  const walkTask = new Task("walking disk").animate();
-  let hashTask = null;
-  let walked = null;
-  const { items, stats } = await scan(roots, {
-    largeFileMB: opts.largeMB ?? DEFAULTS.largeFileMB,
-    dupeMinMB: DEFAULTS.dupeMinMB,
-    exclude: opts.exclude,
-    onProgress: (ev) => {
-      if (ev.type === "walk") {
-        walkTask.update(c.gray(truncateMiddle(`${ev.files.toLocaleString()} files  ${formatSize(ev.bytes)}  ${shortPath(ev.current)}`, detailRoom())));
-      } else if (ev.type === "walked") {
-        walked = ev;
-        walkTask.done(`${ev.files.toLocaleString()} files, ${ev.dirs.toLocaleString()} folders, ${formatSize(ev.bytes)} in ${seconds(ev.ms)}`);
-      } else if (ev.type === "hash") {
-        hashTask ??= new Task("hashing copies").animate();
-        hashTask.update(`${bar(ev.done / ev.total, 16)} ${c.gray(`${formatSize(ev.done)} / ${formatSize(ev.total)}`)}`);
-      }
-    },
-  });
-  if (!walked) walkTask.done(`${stats.files.toLocaleString()} files, ${formatSize(stats.bytes)}`);
-  const dupes = items.filter((i) => i.category === "duplicate").length;
-  if (hashTask) hashTask.done(`${dupes} byte-identical copies`);
-  else logLine("ok", "hashing copies", `${dupes} byte-identical copies`);
-
-  // 2. look inside the files
-  const files = items.filter((i) => i.kind === "file");
-  const inspect = new Task("reading content");
-  files.forEach((item, n) => {
-    inspect.update(c.gray(truncateMiddle(`${n + 1}/${files.length}  ${shortPath(item.path)}`, detailRoom())));
-    Object.assign(item, inspectFile(item.path, item.size, { allowPreview: useAi && !opts.noContent && item.verdict !== "remove" }));
-  });
-  inspect.done(`${files.length} files sniffed, ${files.filter((f) => f.preview).length} previews, ${files.filter((f) => f.sensitive).length} look sensitive`);
-
-  // 3. gemini
-  let aiResults = new Map();
-  let model = "local rules";
-  let checked = 0;
-  if (useAi && items.length) {
-    const gemini = new Gemini({ apiKey, models });
-    const forAi = [...items].sort((a, b) => b.size - a.size).slice(0, opts.maxAi ?? DEFAULTS.maxAi);
-    forAi.forEach((item, i) => (item.aiId = i + 1));
-    const ai = new Task("gemini review").animate();
-    ai.update(`${bar(0)} ${c.gray(`0/${forAi.length} items`)}`);
-    const { results, error } = await classifyItems(forAi, {
-      gemini,
-      batchSize: DEFAULTS.batchSize,
-      onProgress: (done, total) => ai.update(`${bar(done / total)} ${c.gray(`${done}/${total} items`)}`),
-    });
-    aiResults = results;
-    checked = results.size;
-    if (gemini.used.size) model = [...gemini.used].join(", ");
-    if (error) ai.done(`stopped after ${results.size}/${forAi.length}: ${error.message}`, "warn");
-    else ai.done(`${results.size}/${forAi.length} items, ${model}`);
-  } else {
-    logLine("skip", "gemini review", "local rules only");
-  }
-
-  // 4. decide + save
-  const entries = [];
-  let leftOut = 0;
-  for (const item of items) {
-    const final = decide(item, item.aiId ? aiResults.get(item.aiId) : null);
-    if (final.verdict === "keep") {
-      leftOut++;
-      continue;
+  // Each pipeline event drives one status line.
+  const tasks = {};
+  const onEvent = (ev) => {
+    if (ev.type === "walk") {
+      tasks.walk ??= new Task("walking disk").animate();
+      tasks.walk.update(c.gray(truncateMiddle(`${ev.files.toLocaleString()} files  ${formatSize(ev.bytes)}  ${shortPath(ev.current)}`, detailRoom())));
+    } else if (ev.type === "walked") {
+      (tasks.walk ?? new Task("walking disk")).done(`${ev.files.toLocaleString()} files, ${ev.dirs.toLocaleString()} folders, ${formatSize(ev.bytes)} in ${seconds(ev.ms)}`);
+    } else if (ev.type === "hash") {
+      tasks.hash ??= new Task("hashing copies").animate();
+      tasks.hash.update(`${bar(ev.done / ev.total, 16)} ${c.gray(`${formatSize(ev.done)} / ${formatSize(ev.total)}`)}`);
+    } else if (ev.type === "hashed") {
+      if (tasks.hash) tasks.hash.done(`${ev.copies} byte-identical copies`);
+      else logLine("ok", "hashing copies", `${ev.copies} byte-identical copies`);
+    } else if (ev.type === "inspect") {
+      tasks.inspect ??= new Task("reading content");
+      tasks.inspect.update(c.gray(truncateMiddle(`${ev.done}/${ev.total}  ${shortPath(ev.current)}`, detailRoom())));
+    } else if (ev.type === "inspected") {
+      (tasks.inspect ?? new Task("reading content")).done(`${ev.files} files sniffed, ${ev.previews} previews, ${ev.sensitive} look sensitive`);
+    } else if (ev.type === "ai") {
+      tasks.ai ??= new Task("gemini review").animate();
+      tasks.ai.update(`${bar(ev.done / ev.total)} ${c.gray(`${ev.done}/${ev.total} items`)}`);
+    } else if (ev.type === "aiDone") {
+      if (ev.error) tasks.ai.done(`stopped after ${ev.checked}/${ev.total}: ${ev.error}`, "warn");
+      else tasks.ai.done(`${ev.checked}/${ev.total} items, ${ev.model}`);
     }
-    entries.push({ ...final, size: item.size, path: item.path, status: "pending" });
-  }
-  entries.sort((a, b) => (a.verdict === b.verdict ? b.size - a.size : a.verdict === "remove" ? -1 : 1));
-  entries.forEach((e, i) => (e.id = i + 1));
-  const header = makeHeader({ roots, model: useAi ? `local rules + ${model}` : "local rules" });
+  };
+
+  const result = await runScanPipeline({
+    roots,
+    ai: useAi ? { apiKey, models } : null,
+    noContent: opts.noContent,
+    maxAi: opts.maxAi ?? DEFAULTS.maxAi,
+    largeMB: opts.largeMB ?? DEFAULTS.largeFileMB,
+    exclude: opts.exclude,
+    excludeTest: policy?.managed ? (p) => isExcludedByPolicy(policy, p) : null,
+    onEvent,
+  });
+  const { entries, stats } = result;
+  if (!useAi) logLine("skip", "gemini review", "local rules only");
+
+  const header = makeHeader({ roots, model: result.classifiedBy });
   fs.mkdirSync(path.dirname(dbFile), { recursive: true });
   writeDb(dbFile, header, entries);
+  audit("scan", { roots, files: stats.files, bytes: stats.bytes, found: entries.length, classifiedBy: result.classifiedBy });
   logLine("ok", "database", shortPath(dbFile));
   console.log();
 
-  reportBox(entries, { roots, stats, elapsed: Date.now() - started, candidates: items.length, checked, model, leftOut });
+  reportBox(entries, {
+    roots, stats, elapsed: result.durationMs, candidates: result.candidates, checked: result.checked, model: result.model, leftOut: result.leftOut,
+  });
   if (!entries.length) {
     console.log(`\n  ${c.hi("Clean already. Nothing to remove here.")}`);
     console.log(`  ${c.gray("See the biggest folders on the whole drive with")} ${c.hi("cleaner map")}\n`);
@@ -324,6 +316,7 @@ async function runMap(args, opts) {
   if (!fs.existsSync(root)) throw new Error(`folder not found: ${root}`);
 
   banner(VERSION);
+  applyPolicy(opts);
   const { useAi, apiKey, models } = geminiSetup(opts);
   if (useAi) logLine("info", "privacy", "only folder names and sizes go to gemini");
   logLine("ok", "target", shortPath(root));
@@ -393,10 +386,115 @@ async function runMap(args, opts) {
   console.log(`  ${c.gray("Nothing was changed. Hunt junk inside a folder with")} ${c.hi("cleaner scan <folder>")}${c.gray(".")}\n`);
 }
 
+const CASING = { title: "Title Case", lower: "lower case", upper: "UPPER CASE", kebab: "kebab-case", snake: "snake_case", pascal: "PascalCase", sentence: "Sentence case", natural: "natural" };
+
+async function runOrganize(args, opts) {
+  const root = path.resolve(args[0] ?? desktopDir());
+  banner(VERSION);
+  const blocked = organizeBlocked(root);
+  if (blocked) throw new Error(`${shortPath(root)}: ${blocked}`);
+  applyPolicy(opts);
+  const { useAi, apiKey, models } = geminiSetup(opts);
+  if (useAi) logLine("info", "privacy", "only file names, sizes and dates go to gemini");
+  logLine("ok", "target", shortPath(root));
+
+  const analysis = analyzeFolder(root, { systemLocale: Intl.DateTimeFormat().resolvedOptions().locale });
+  const { style } = analysis;
+  const language = LANGUAGE_NAMES[style.language];
+  if (style.detected) logLine("ok", "your style", `${language}, ${CASING[style.casing] ?? style.casing}${style.numbering ? ", numbered" : ""}, from ${analysis.folders.length} folders`);
+  else logLine("info", "your style", `none found yet, basic folders in ${language} (${style.languageSource === "system" ? "your Windows language" : "default"})`);
+  if (!analysis.files.length) {
+    logLine("ok", "tidy", "no loose files to organize here");
+    console.log();
+    return;
+  }
+
+  let plan = rulePlan(analysis);
+  if (useAi) {
+    const task = new Task("gemini plans").animate();
+    try {
+      plan = await aiPlan(analysis, plan, { gemini: new Gemini({ apiKey, models }) });
+      task.done(`${plan.moves.filter((m) => m.source === "gemini").length} files placed by gemini`);
+    } catch (err) {
+      task.done(`kept the local plan: ${err.message}`, "warn");
+    }
+  }
+  console.log();
+
+  const byId = new Map(analysis.files.map((f) => [f.id, f]));
+  const groups = new Map();
+  for (const m of plan.moves) {
+    if (!groups.has(m.folder)) groups.set(m.folder, { isNew: m.isNew, files: [] });
+    groups.get(m.folder).files.push(byId.get(m.id));
+  }
+  const ordered = [...groups].sort((a, b) => b[1].files.length - a[1].files.length);
+  const width = columns();
+  rule("the plan");
+  for (const [folder, g] of ordered) {
+    console.log(`  ${c.hi("->")} ${c.white(truncateEnd(folder, 40))}${g.isNew ? c.amber("  new") : c.faint("  existing")}  ${c.gray(`${g.files.length} file${g.files.length === 1 ? "" : "s"}, ${formatSize(sum(g.files))}`)}`);
+    const names = g.files.map((f) => f.name);
+    const shown = names.slice(0, 4).join(", ") + (names.length > 4 ? `, and ${names.length - 4} more` : "");
+    console.log(`     ${c.faint("└─")} ${c.dim(truncateEnd(shown, Math.max(20, width - 10)))}`);
+  }
+  if (plan.stay.length) console.log(`  ${c.faint("·")}  ${c.gray(`${plan.stay.length} file${plan.stay.length === 1 ? "" : "s"} with no obvious place stay${plan.stay.length === 1 ? "s" : ""} where ${plan.stay.length === 1 ? "it is" : "they are"}`)}`);
+  if (analysis.skipped.length) console.log(`  ${c.faint("·")}  ${c.gray(`${analysis.skipped.length} left alone: shortcuts, hidden or busy files are never moved`)}`);
+  console.log();
+
+  if (!plan.moves.length) {
+    logLine("ok", "tidy", "everything already has its place");
+    console.log();
+    return;
+  }
+  if (opts.dryRun) {
+    logLine("ok", "dry run", "nothing was moved");
+    console.log();
+    return;
+  }
+  const newFolders = ordered.filter(([, g]) => g.isNew).length;
+  const yes = await askKey(`  ${c.hi(">")} ${c.white(`move ${plan.moves.length} files into ${groups.size} folders${newFolders ? ` (${newFolders} new)` : ""}?`)} ${c.gray("[y/N]")} `);
+  console.log();
+  if (!yes) {
+    logLine("ok", "cancelled", "nothing was moved");
+    console.log();
+    return;
+  }
+  const journal = applyPlan(analysis, plan.moves);
+  audit("organize", { root, items: journal.moves.map((m) => ({ path: m.from, to: m.to, size: m.size })), run: journal.id });
+  logLine(journal.failed.length ? "warn" : "ok", "organized", `${journal.moves.length} files moved, ${journal.createdFolders.length} folders created`);
+  for (const f of journal.failed) logLine("skip", f.reason, shortPath(f.path));
+  console.log();
+  console.log(`  ${c.gray("Changed your mind? Put everything back with")} ${c.hi("cleaner organize --undo")}${c.gray(".")}
+`);
+}
+
+async function runOrganizeUndo() {
+  banner(VERSION);
+  const last = listJournals().find((j) => !j.undoneAt && j.moves.length);
+  if (!last) {
+    logLine("ok", "organize", "no organize run to undo");
+    console.log();
+    return;
+  }
+  logLine("info", "last run", `${shortPath(last.root)}, ${new Date(last.time).toLocaleString()}`);
+  const yes = await askKey(`  ${c.hi(">")} ${c.white(`move ${last.moves.length} files back where they were?`)} ${c.gray("[y/N]")} `);
+  console.log();
+  if (!yes) {
+    logLine("ok", "cancelled", "nothing was moved");
+    console.log();
+    return;
+  }
+  const r = undoOrganize(last.id);
+  audit("organize-undo", { root: last.root, items: last.moves.map((m) => ({ path: m.from, size: m.size })), run: last.id });
+  logLine(r.skipped.length ? "warn" : "ok", "undone", `${r.restored} of ${last.moves.length} files are back`);
+  for (const s of r.skipped) logLine("skip", s.reason, shortPath(s.path));
+  console.log();
+}
+
 async function runClean(opts) {
   const dbFile = opts.db ?? DEFAULTS.db;
   const { header, entries } = readDb(dbFile);
   banner(VERSION);
+  applyPolicy(opts);
   if (opts.hold) logLine("info", "mode", "hold: items are moved aside, nothing is deleted");
   for (const e of entries) if (e.status === "pending" && !fs.existsSync(e.path)) e.status = "missing";
   const live = entries.filter((e) => e.status === "pending");
@@ -504,6 +602,8 @@ async function runRestore() {
     return;
   }
   const r = restoreHeld(held);
+  const result = (h) => (r.restored.includes(h) ? "restored" : r.conflicts.includes(h) ? "conflict" : "failed");
+  audit("restore", { items: held.map((h) => ({ path: h.original, size: h.size, result: result(h) })) });
   logLine(r.failed.length || r.conflicts.length ? "warn" : "ok", "restored", `${r.restored.length} of ${held.length} items are back`);
   for (const h of r.conflicts) logLine("skip", "already there", shortPath(h.original));
   for (const h of r.failed) logLine("fail", "not moved", shortPath(h.original));
@@ -530,6 +630,7 @@ async function runPurge() {
   }
   const before = freeBytes(HOLD_DIR);
   const r = purgeHeld(held);
+  audit("purge", { items: held.map((h) => ({ path: h.original, size: h.size, result: r.purged.includes(h) ? "purged" : "failed" })) });
   const after = freeBytes(HOLD_DIR);
   logLine(r.failed.length ? "warn" : "ok", "purged", `${r.purged.length} of ${held.length} items deleted`);
   for (const h of r.failed) logLine("fail", "still there", shortPath(h.held));
@@ -577,6 +678,7 @@ export async function main(argv) {
     loadEnv();
     migrateOldDb();
     if (cmd === "map") await runMap(args, opts);
+    else if (cmd === "organize") await (opts.undo ? runOrganizeUndo() : runOrganize(args, opts));
     else if (cmd === "list") runList(opts);
     else if (cmd === "export") runExport(opts);
     else if (cmd === "clean") await runClean(opts);
