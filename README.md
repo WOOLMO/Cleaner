@@ -49,13 +49,13 @@ Cleaner comes as a **desktop app** and a **command line tool**. Both run the sam
 
 ## Desktop app
 
-Download `Cleaner-Setup-1.1.0.exe` (installer) or `Cleaner-1.1.0-portable.exe` (no install) from [Releases](https://github.com/WOOLMO/Cleaner/releases), or build them yourself:
+Download `Cleaner-Setup-1.1.0.exe` (installer) or `Cleaner-1.1.0-win-x64.zip` (no install: unzip anywhere outside AppData and run `Cleaner.exe`) from [Releases](https://github.com/WOOLMO/Cleaner/releases), or build them yourself:
 
 ```powershell
 git clone https://github.com/WOOLMO/Cleaner
 cd Cleaner\desktop
 npm install
-npm run dist        # release\Cleaner-Setup-1.1.0.exe and the portable exe
+npm run dist        # release\Cleaner-Setup-1.1.0.exe and the zip
 ```
 
 The builds are not code-signed yet, so Windows SmartScreen may ask you to confirm the first launch.

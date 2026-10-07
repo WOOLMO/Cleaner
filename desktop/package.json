@@ -55,9 +55,10 @@
     "win": {
       "target": [
         "nsis",
-        "portable"
+        "zip"
       ],
-      "icon": "build/icon.png"
+      "icon": "build/icon.png",
+      "artifactName": "Cleaner-${version}-win-x64.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -65,10 +66,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "shortcutName": "Cleaner",
-      "artifactName": "Cleaner-Setup-${version}.${ext}"
-    },
-    "portable": {
-      "artifactName": "Cleaner-${version}-portable.${ext}"
+      "artifactName": "Cleaner-Setup-${version}.${ext}",
+      "include": "build/installer.nsh"
     }
   }
 }
