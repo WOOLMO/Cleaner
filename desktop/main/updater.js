@@ -20,7 +20,15 @@ const set = (patch) => {
   state = { ...state, ...patch };
   notify(state);
 };
-const short = (err) => String(err?.message ?? err).split("\n")[0].slice(0, 200);
+// electron-updater's errors carry whole HTTP responses; the window gets one plain sentence
+const short = (err) => {
+  const text = String(err?.message ?? err);
+  if (/ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|ERR_NETWORK_CHANGED/.test(text)) return "GitHub could not be reached. Are you offline?";
+  if (/Unable to find latest version|No published versions/i.test(text)) return "No release has been published yet.";
+  if (/sha512 checksum mismatch/i.test(text)) return "The download did not match its published checksum, so it was thrown away.";
+  if (/HttpError: (403|429)/.test(text)) return "GitHub is limiting requests right now. It will try again later.";
+  return text.split("\n")[0].replace(/^(Error: )+/, "").slice(0, 160);
+};
 
 export const updateState = () => state;
 
